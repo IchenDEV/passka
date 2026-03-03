@@ -1,0 +1,17 @@
+[package]
+name = "passka-ffi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+passka-core.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+swift-bridge = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[build-dependencies]
+swift-bridge-build = "0.1"
