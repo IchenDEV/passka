@@ -55,14 +55,22 @@ pub fn run_show(name: &str) -> Result<()> {
     println!("Created:     {}", meta.created_at);
     println!("Updated:     {}", meta.updated_at);
     println!();
+
+    let sensitive = meta.cred_type.sensitive_fields();
     println!("Fields:");
     for (field, val) in &data.fields {
-        println!("  {field:<16} {}", mask_value(val));
+        let display = if sensitive.contains(&field.as_str()) {
+            mask_value(val)
+        } else {
+            val.clone()
+        };
+        println!("  {field:<20} {display}");
     }
+
     println!();
     println!("Env vars:");
     for (field, env_name) in &meta.env_vars {
-        println!("  {field:<16} -> ${env_name}");
+        println!("  {field:<20} -> ${env_name}");
     }
 
     Ok(())

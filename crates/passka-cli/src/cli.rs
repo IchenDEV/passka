@@ -9,7 +9,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Add a new credential (interactive secure input)
+    /// Add a new credential (interactive guided flow)
     Add {
         name: String,
         #[arg(short, long)]
@@ -17,15 +17,15 @@ pub enum Command {
         #[arg(short, long)]
         description: Option<String>,
     },
-    /// Get a credential value (outputs to stdout)
-    Get {
-        name: String,
-        #[arg(short, long)]
-        field: Option<String>,
-    },
-    /// Inject credential as env vars and execute a command
+    /// Authorize an OAuth credential (browser-based flow)
+    Auth { name: String },
+    /// Inject credentials as env vars and execute a command
     Exec {
-        name: String,
+        /// One or more credential names to inject
+        names: Vec<String>,
+        /// Redact sensitive values from child process output
+        #[arg(long)]
+        redact: bool,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -46,12 +46,4 @@ pub enum Command {
     },
     /// Refresh an OAuth token
     Refresh { name: String },
-    /// Generate a code snippet for using a credential
-    Snippet {
-        name: String,
-        #[arg(short, long, default_value = "bash")]
-        lang: String,
-    },
-    /// Output export statements for a credential
-    Env { name: String },
 }

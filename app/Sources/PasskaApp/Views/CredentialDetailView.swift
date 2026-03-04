@@ -104,11 +104,11 @@ struct CredentialDetailView: View {
 
     private func fieldNamesForType(_ type: String) -> [String] {
         switch type {
-        case "user_pass": return ["username", "password", "url"]
-        case "cookie": return ["value", "domain", "path", "expires"]
-        case "api_key": return ["key", "provider", "endpoint"]
-        case "app_secret": return ["access_key", "secret_key", "app_name"]
-        case "token": return ["token", "refresh_token", "expires_at", "refresh_url", "client_id", "client_secret"]
+        case "api_key": return ["key", "secret", "endpoint"]
+        case "password": return ["username", "password", "url"]
+        case "session": return Array(entry.envVars.keys.sorted())
+        case "oauth": return ["token", "refresh_token", "token_url", "authorize_url",
+                              "client_id", "client_secret", "redirect_uri", "scopes", "expires_at"]
         default: return Array(entry.envVars.keys.sorted())
         }
     }

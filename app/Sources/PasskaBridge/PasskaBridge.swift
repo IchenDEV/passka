@@ -1,8 +1,9 @@
 import Foundation
+import Security
 
-/// Swift wrapper around the Rust FFI functions.
-/// Calls the passka CLI as a subprocess for reliable cross-language interop.
-/// This avoids swift-bridge build complexity while sharing the same Keychain data.
+/// Swift wrapper around Passka storage.
+/// Reads the index file and keychain directly for the GUI.
+/// CLI is only used for write operations that need interactive input.
 public enum PasskaBridge {
 
     private static let cliPath: String = {
@@ -16,11 +17,10 @@ public enum PasskaBridge {
             ?? "passka"
     }()
 
+    private static let serviceName = "passka"
+
     public static func listCredentials(typeFilter: String? = nil) -> [[String: Any]] {
-        var args = ["list", "--type", "json"]
-        if let t = typeFilter { args = ["list", "--type", t] }
-        // Fall back to reading the index file directly for the GUI
-        return readIndex(typeFilter: typeFilter)
+        readIndex(typeFilter: typeFilter)
     }
 
     public static func getCredentialMeta(name: String) -> [String: Any]? {
@@ -28,9 +28,14 @@ public enum PasskaBridge {
         return entries.first { ($0["name"] as? String) == name }
     }
 
+    /// Read a credential field directly from the macOS keychain.
+    /// Requires Touch ID / authentication at the caller level.
     public static func getCredentialValue(name: String, field: String) -> String? {
-        let result = shell([cliPath, "get", name, "--field", field])
-        return result.isEmpty ? nil : result
+        guard let data = readKeychainEntry(account: name) else { return nil }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let fields = json["fields"] as? [String: String]
+        else { return nil }
+        return fields[field]
     }
 
     public static func addCredentialRaw(
@@ -38,8 +43,6 @@ public enum PasskaBridge {
     ) -> Bool {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: ["fields": fields]),
               let json = String(data: jsonData, encoding: .utf8) else { return false }
-        // Use the core library's index file + keychain directly
-        // For now, we'll use the CLI approach
         let fieldsArgs = fields.flatMap { ["-f", "\($0.key)=\($0.value)"] }
         let _ = shell([cliPath, "add", name, "--type", type] + fieldsArgs)
         return true
@@ -62,6 +65,20 @@ public enum PasskaBridge {
             return arr.filter { ($0["cred_type"] as? String) == filter }
         }
         return arr
+    }
+
+    private static func readKeychainEntry(account: String) -> Data? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { return nil }
+        return result as? Data
     }
 
     private static func shell(_ args: [String]) -> String {

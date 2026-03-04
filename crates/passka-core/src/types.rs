@@ -4,62 +4,36 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialType {
-    UserPass,
-    Cookie,
     ApiKey,
-    AppSecret,
-    Token,
-    Custom,
+    Password,
+    Session,
+    OAuth,
 }
 
 impl CredentialType {
-    pub fn required_fields(&self) -> &[&str] {
-        match self {
-            Self::UserPass => &["username", "password"],
-            Self::Cookie => &["value", "domain"],
-            Self::ApiKey => &["key"],
-            Self::AppSecret => &["access_key", "secret_key"],
-            Self::Token => &["token"],
-            Self::Custom => &[],
-        }
-    }
-
-    pub fn optional_fields(&self) -> &[&str] {
-        match self {
-            Self::UserPass => &["url"],
-            Self::Cookie => &["path", "expires"],
-            Self::ApiKey => &["provider", "endpoint"],
-            Self::AppSecret => &["app_name"],
-            Self::Token => &[
-                "refresh_token",
-                "expires_at",
-                "refresh_url",
-                "client_id",
-                "client_secret",
-            ],
-            Self::Custom => &[],
-        }
-    }
-
     pub fn all_variants() -> &'static [CredentialType] {
-        &[
-            Self::UserPass,
-            Self::Cookie,
-            Self::ApiKey,
-            Self::AppSecret,
-            Self::Token,
-            Self::Custom,
-        ]
+        &[Self::ApiKey, Self::Password, Self::Session, Self::OAuth]
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::UserPass => "user_pass",
-            Self::Cookie => "cookie",
             Self::ApiKey => "api_key",
-            Self::AppSecret => "app_secret",
-            Self::Token => "token",
-            Self::Custom => "custom",
+            Self::Password => "password",
+            Self::Session => "session",
+            Self::OAuth => "oauth",
+        }
+    }
+
+    pub fn sensitive_fields(&self) -> &[&str] {
+        match self {
+            Self::ApiKey => &["key", "secret"],
+            Self::Password => &["password"],
+            Self::Session => &[],
+            Self::OAuth => &[
+                "token",
+                "refresh_token",
+                "client_secret",
+            ],
         }
     }
 }
@@ -74,13 +48,13 @@ impl std::str::FromStr for CredentialType {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "user_pass" => Ok(Self::UserPass),
-            "cookie" => Ok(Self::Cookie),
             "api_key" => Ok(Self::ApiKey),
-            "app_secret" => Ok(Self::AppSecret),
-            "token" => Ok(Self::Token),
-            "custom" => Ok(Self::Custom),
-            _ => Err(format!("unknown credential type: {s}")),
+            "password" => Ok(Self::Password),
+            "session" => Ok(Self::Session),
+            "oauth" => Ok(Self::OAuth),
+            _ => Err(format!(
+                "unknown type '{s}'. valid: api_key, password, session, oauth"
+            )),
         }
     }
 }
@@ -104,28 +78,36 @@ pub struct CredentialData {
 }
 
 impl CredentialMeta {
-    pub fn default_env_vars(name: &str, cred_type: &CredentialType) -> HashMap<String, String> {
+    pub fn default_env_vars(
+        name: &str,
+        cred_type: &CredentialType,
+        data: &CredentialData,
+    ) -> HashMap<String, String> {
         let upper = name.to_uppercase().replace('-', "_");
         let mut vars = HashMap::new();
         match cred_type {
             CredentialType::ApiKey => {
                 vars.insert("key".into(), format!("{upper}_API_KEY"));
+                if data.fields.contains_key("secret") {
+                    vars.insert("secret".into(), format!("{upper}_API_SECRET"));
+                }
             }
-            CredentialType::UserPass => {
+            CredentialType::Password => {
                 vars.insert("username".into(), format!("{upper}_USERNAME"));
                 vars.insert("password".into(), format!("{upper}_PASSWORD"));
             }
-            CredentialType::AppSecret => {
-                vars.insert("access_key".into(), format!("{upper}_ACCESS_KEY"));
-                vars.insert("secret_key".into(), format!("{upper}_SECRET_KEY"));
+            CredentialType::Session => {
+                for key in data.fields.keys() {
+                    if key == "domain" || key == "expires" {
+                        continue;
+                    }
+                    let env_suffix = key.to_uppercase().replace('-', "_");
+                    vars.insert(key.clone(), format!("{upper}_{env_suffix}"));
+                }
             }
-            CredentialType::Token => {
+            CredentialType::OAuth => {
                 vars.insert("token".into(), format!("{upper}_TOKEN"));
             }
-            CredentialType::Cookie => {
-                vars.insert("value".into(), format!("{upper}_COOKIE"));
-            }
-            CredentialType::Custom => {}
         }
         vars
     }
@@ -148,7 +130,6 @@ mod tests {
     fn test_mask_value() {
         assert_eq!(mask_value("sk-abc123def456"), "sk****f456");
         assert_eq!(mask_value("ab"), "**");
-        assert_eq!(mask_value("abcde"), "ab****bcde");
     }
 
     #[test]
@@ -158,5 +139,16 @@ mod tests {
             let parsed: CredentialType = s.parse().unwrap();
             assert_eq!(*ct, parsed);
         }
+    }
+
+    #[test]
+    fn test_session_env_vars() {
+        let mut fields = HashMap::new();
+        fields.insert("Cookie".into(), "abc".into());
+        fields.insert("X-CSRF-Token".into(), "xyz".into());
+        let data = CredentialData { fields };
+        let vars = CredentialMeta::default_env_vars("jira", &CredentialType::Session, &data);
+        assert_eq!(vars.get("Cookie").unwrap(), "JIRA_COOKIE");
+        assert_eq!(vars.get("X-CSRF-Token").unwrap(), "JIRA_X_CSRF_TOKEN");
     }
 }

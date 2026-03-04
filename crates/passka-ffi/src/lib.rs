@@ -27,7 +27,9 @@ fn passka_list_credentials(type_filter: Option<String>) -> String {
     };
     let filter = type_filter.and_then(|s| s.parse::<CredentialType>().ok());
     match index.list(filter.as_ref()) {
-        Ok(entries) => serde_json::to_string(&entries).unwrap_or_else(|e| json_error(&e.to_string())),
+        Ok(entries) => {
+            serde_json::to_string(&entries).unwrap_or_else(|e| json_error(&e.to_string()))
+        }
         Err(e) => json_error(&e.to_string()),
     }
 }
@@ -42,7 +44,7 @@ fn passka_get_credential_value(name: &str, field: &str) -> Option<String> {
     if field == "token" {
         if let Ok(index) = IndexStore::new() {
             if let Ok(meta) = index.get(name) {
-                if meta.cred_type == CredentialType::Token {
+                if meta.cred_type == CredentialType::OAuth {
                     return passka_core::oauth::get_valid_token(name).ok();
                 }
             }
@@ -70,11 +72,12 @@ fn passka_add_credential(
         return json_error(&e.to_string());
     }
     let now = chrono::Utc::now().to_rfc3339();
+    let env_vars = CredentialMeta::default_env_vars(name, &ct, &data);
     let meta = CredentialMeta {
         name: name.to_string(),
-        cred_type: ct.clone(),
+        cred_type: ct,
         description: description.to_string(),
-        env_vars: CredentialMeta::default_env_vars(name, &ct),
+        env_vars,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -116,10 +119,7 @@ fn passka_remove_credential(name: &str) -> String {
 
 fn passka_refresh_token(name: &str) -> String {
     match passka_core::oauth::get_valid_token(name) {
-        Ok(token) => {
-            let masked = passka_core::types::mask_value(&token);
-            format!(r#"{{"ok":true,"masked":"{masked}"}}"#)
-        }
+        Ok(_) => r#"{"ok":true}"#.to_string(),
         Err(e) => json_error(&e.to_string()),
     }
 }

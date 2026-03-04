@@ -5,11 +5,9 @@ struct SidebarView: View {
 
     private let types: [(id: String, label: String, icon: String)] = [
         ("api_key", "API Keys", "key.fill"),
-        ("user_pass", "Passwords", "person.badge.key.fill"),
-        ("cookie", "Cookies", "globe"),
-        ("token", "Tokens", "arrow.triangle.2.circlepath"),
-        ("app_secret", "App Secrets", "lock.shield.fill"),
-        ("custom", "Custom", "ellipsis.rectangle.fill"),
+        ("password", "Passwords", "person.badge.key.fill"),
+        ("session", "Sessions", "globe"),
+        ("oauth", "OAuth", "arrow.triangle.2.circlepath"),
     ]
 
     var body: some View {
