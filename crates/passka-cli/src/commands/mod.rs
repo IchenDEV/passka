@@ -18,9 +18,9 @@ pub fn dispatch(cmd: Command) -> Result<()> {
         Command::Auth { name } => auth::run(&name),
         Command::Exec {
             names,
-            redact,
+            no_redact,
             command,
-        } => exec::run(&names, redact, &command),
+        } => exec::run(&names, !no_redact, &command),
         Command::List { r#type } => list::run_list(r#type.as_deref()),
         Command::Show { name } => list::run_show(&name),
         Command::Rm { name } => manage::run_rm(&name),

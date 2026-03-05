@@ -49,7 +49,7 @@ passka auth slack                      # 第二步：浏览器授权流程（自
 ### 带凭据执行命令（推荐）
 
 ```bash
-# 单凭据注入
+# 单凭据注入（输出自动脱敏）
 passka exec openai -- curl -s \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   https://api.openai.com/v1/models
@@ -57,8 +57,8 @@ passka exec openai -- curl -s \
 # 多凭据同时注入
 passka exec openai github -- python pipeline.py
 
-# 输出脱敏（凭据值替换为 [REDACTED]）
-passka exec --redact openai -- python debug_api.py
+# 关闭脱敏（仅在需要原始输出时使用）
+passka exec --no-redact openai -- python trusted_script.py
 ```
 
 ### 查看和管理
@@ -77,7 +77,7 @@ passka refresh slack           # 刷新 OAuth Token
 `passka exec` 是唯一的凭据访问方式：
 
 - 凭据注入为子进程的环境变量，不经过 stdout
-- `--redact` 标志捕获并替换输出中的敏感值为 `[REDACTED]`
+- 输出默认脱敏：子进程 stdout/stderr 中的敏感值自动替换为 `[REDACTED]`（`--no-redact` 关闭）
 - `show` 命令只展示脱敏后的值
 - `refresh` 命令不输出 token 值
 
@@ -110,8 +110,8 @@ passka exec openai -- curl -s -H "Authorization: Bearer $OPENAI_API_KEY" https:/
 # 多凭据场景
 passka exec openai github -- python deploy.py
 
-# 调试时使用 --redact
-passka exec --redact openai -- python test_auth.py
+# 输出默认脱敏，无需额外参数
+passka exec openai -- python test_auth.py
 ```
 
 ## 存储架构

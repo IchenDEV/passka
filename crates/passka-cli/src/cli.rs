@@ -23,9 +23,9 @@ pub enum Command {
     Exec {
         /// One or more credential names to inject
         names: Vec<String>,
-        /// Redact sensitive values from child process output
+        /// Disable output redaction (redact is ON by default)
         #[arg(long)]
-        redact: bool,
+        no_redact: bool,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
