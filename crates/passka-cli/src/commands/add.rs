@@ -1,5 +1,5 @@
 use anyhow::Result;
-use dialoguer::{Confirm, Input, Password};
+use dialoguer::{Input, Password};
 use passka_core::types::{CredentialData, CredentialMeta, CredentialType};
 use passka_core::{IndexStore, KeychainStore};
 use std::collections::HashMap;
@@ -11,9 +11,7 @@ pub fn run(name: &str, type_str: &str, description: Option<&str>) -> Result<()> 
     let index = IndexStore::new()?;
 
     let fields = match cred_type {
-        CredentialType::ApiKey => add_api_key()?,
-        CredentialType::Password => add_password()?,
-        CredentialType::Session => add_session()?,
+        CredentialType::Secret => add_secret()?,
         CredentialType::OAuth => add_oauth()?,
     };
 
@@ -43,73 +41,13 @@ pub fn run(name: &str, type_str: &str, description: Option<&str>) -> Result<()> 
     Ok(())
 }
 
-fn add_api_key() -> Result<HashMap<String, String>> {
+fn add_secret() -> Result<HashMap<String, String>> {
     let mut fields = HashMap::new();
 
-    let key = Password::new()
-        .with_prompt("API key (required)")
-        .interact()?;
-    fields.insert("key".into(), key);
-
-    let has_secret = Confirm::new()
-        .with_prompt("does this key have a paired secret (AK/SK)?")
-        .default(false)
-        .interact()?;
-
-    if has_secret {
-        let secret = Password::new()
-            .with_prompt("API secret")
-            .interact()?;
-        fields.insert("secret".into(), secret);
-    }
-
-    let endpoint: String = Input::new()
-        .with_prompt("endpoint URL (optional, enter to skip)")
-        .allow_empty(true)
-        .interact_text()?;
-    if !endpoint.is_empty() {
-        fields.insert("endpoint".into(), endpoint);
-    }
-
-    Ok(fields)
-}
-
-fn add_password() -> Result<HashMap<String, String>> {
-    let mut fields = HashMap::new();
-
-    let username: String = Input::new()
-        .with_prompt("username (required)")
-        .interact_text()?;
-    fields.insert("username".into(), username);
-
-    let password = Password::new()
-        .with_prompt("password (required)")
-        .interact()?;
-    fields.insert("password".into(), password);
-
-    let url: String = Input::new()
-        .with_prompt("URL (optional, enter to skip)")
-        .allow_empty(true)
-        .interact_text()?;
-    if !url.is_empty() {
-        fields.insert("url".into(), url);
-    }
-
-    Ok(fields)
-}
-
-fn add_session() -> Result<HashMap<String, String>> {
-    let mut fields = HashMap::new();
-
-    let domain: String = Input::new()
-        .with_prompt("domain (required, e.g. example.com)")
-        .interact_text()?;
-    fields.insert("domain".into(), domain);
-
-    eprintln!("enter header/cookie key-value pairs (empty key to finish):");
+    eprintln!("enter field key-value pairs (empty key to finish):");
     loop {
         let key: String = Input::new()
-            .with_prompt("  header/cookie name")
+            .with_prompt("  key")
             .allow_empty(true)
             .interact_text()?;
         if key.is_empty() {
@@ -121,8 +59,8 @@ fn add_session() -> Result<HashMap<String, String>> {
         fields.insert(key, val);
     }
 
-    if fields.len() <= 1 {
-        anyhow::bail!("session credential requires at least one header/cookie entry");
+    if fields.is_empty() {
+        anyhow::bail!("secret credential requires at least one field");
     }
 
     Ok(fields)

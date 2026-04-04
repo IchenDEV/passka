@@ -4,31 +4,25 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialType {
-    ApiKey,
-    Password,
-    Session,
+    Secret,
     OAuth,
 }
 
 impl CredentialType {
     pub fn all_variants() -> &'static [CredentialType] {
-        &[Self::ApiKey, Self::Password, Self::Session, Self::OAuth]
+        &[Self::Secret, Self::OAuth]
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::ApiKey => "api_key",
-            Self::Password => "password",
-            Self::Session => "session",
+            Self::Secret => "secret",
             Self::OAuth => "oauth",
         }
     }
 
     pub fn sensitive_fields(&self) -> &[&str] {
         match self {
-            Self::ApiKey => &["key", "secret"],
-            Self::Password => &["password"],
-            Self::Session => &[],
+            Self::Secret => &[],
             Self::OAuth => &[
                 "token",
                 "refresh_token",
@@ -48,12 +42,10 @@ impl std::str::FromStr for CredentialType {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "api_key" => Ok(Self::ApiKey),
-            "password" => Ok(Self::Password),
-            "session" => Ok(Self::Session),
+            "secret" => Ok(Self::Secret),
             "oauth" => Ok(Self::OAuth),
             _ => Err(format!(
-                "unknown type '{s}'. valid: api_key, password, session, oauth"
+                "unknown type '{s}'. valid: secret, oauth"
             )),
         }
     }
@@ -86,21 +78,8 @@ impl CredentialMeta {
         let upper = name.to_uppercase().replace('-', "_");
         let mut vars = HashMap::new();
         match cred_type {
-            CredentialType::ApiKey => {
-                vars.insert("key".into(), format!("{upper}_API_KEY"));
-                if data.fields.contains_key("secret") {
-                    vars.insert("secret".into(), format!("{upper}_API_SECRET"));
-                }
-            }
-            CredentialType::Password => {
-                vars.insert("username".into(), format!("{upper}_USERNAME"));
-                vars.insert("password".into(), format!("{upper}_PASSWORD"));
-            }
-            CredentialType::Session => {
+            CredentialType::Secret => {
                 for key in data.fields.keys() {
-                    if key == "domain" || key == "expires" {
-                        continue;
-                    }
                     let env_suffix = key.to_uppercase().replace('-', "_");
                     vars.insert(key.clone(), format!("{upper}_{env_suffix}"));
                 }
@@ -142,12 +121,12 @@ mod tests {
     }
 
     #[test]
-    fn test_session_env_vars() {
+    fn test_secret_env_vars() {
         let mut fields = HashMap::new();
         fields.insert("Cookie".into(), "abc".into());
         fields.insert("X-CSRF-Token".into(), "xyz".into());
         let data = CredentialData { fields };
-        let vars = CredentialMeta::default_env_vars("jira", &CredentialType::Session, &data);
+        let vars = CredentialMeta::default_env_vars("jira", &CredentialType::Secret, &data);
         assert_eq!(vars.get("Cookie").unwrap(), "JIRA_COOKIE");
         assert_eq!(vars.get("X-CSRF-Token").unwrap(), "JIRA_X_CSRF_TOKEN");
     }

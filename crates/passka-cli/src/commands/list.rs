@@ -1,5 +1,6 @@
 use anyhow::Result;
 use passka_core::types::{mask_value, CredentialType};
+
 use passka_core::{IndexStore, KeychainStore};
 
 pub fn run_list(type_filter: Option<&str>) -> Result<()> {
@@ -57,9 +58,10 @@ pub fn run_show(name: &str) -> Result<()> {
     println!();
 
     let sensitive = meta.cred_type.sensitive_fields();
+    let all_sensitive = meta.cred_type == CredentialType::Secret;
     println!("Fields:");
     for (field, val) in &data.fields {
-        let display = if sensitive.contains(&field.as_str()) {
+        let display = if all_sensitive || sensitive.contains(&field.as_str()) {
             mask_value(val)
         } else {
             val.clone()
