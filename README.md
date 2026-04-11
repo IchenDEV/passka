@@ -157,12 +157,26 @@ cargo run -p passka-cli -- auth <account_id>
 
 Passka stores and refreshes OAuth material locally. Agents still request leases and proxy requests; they do not receive refresh tokens.
 
+## OTP Accounts
+
+Passka can also store TOTP seeds and generate current one-time codes through the broker reveal path:
+
+```bash
+cargo run -p passka-cli -- account add github-otp \
+  --provider github \
+  --auth otp
+
+cargo run -p passka-cli -- account reveal <account_id> --field code --raw
+```
+
+The OTP seed remains in macOS Keychain. Revealing `code` or `seed` is audited and follows the same human reveal rules as other sensitive fields.
+
 ## macOS App
 
 The macOS app is a broker console:
 
 - Browse provider accounts by provider.
-- Add API key, OAuth, and opaque provider accounts.
+- Add API key, OAuth, OTP, and opaque provider accounts.
 - Reveal sensitive fields only after local authentication.
 - Inspect recent audit history for an account.
 
@@ -324,6 +338,7 @@ cargo run -p passka-cli -- principal add <name> --kind agent
 cargo run -p passka-cli -- account list
 cargo run -p passka-cli -- account show <account_id>
 cargo run -p passka-cli -- account reveal <account_id> --field api_key
+cargo run -p passka-cli -- account reveal <account_id> --field code --raw
 cargo run -p passka-cli -- account remove <account_id>
 
 cargo run -p passka-cli -- policy list

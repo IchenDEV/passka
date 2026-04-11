@@ -133,6 +133,7 @@ impl Broker {
         {
             anyhow::bail!("account '{}' already exists", request.name);
         }
+        request.secret.validate()?;
 
         let now = now();
         let account = ProviderAccount {
@@ -903,6 +904,7 @@ fn credential_token(credential: &ProxyCredential) -> Result<Option<String>> {
             }
             Some(secret.access_token.clone())
         }
+        ProviderSecret::Otp(_) => anyhow::bail!("OTP secrets cannot be proxied over HTTP"),
     })
 }
 

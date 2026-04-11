@@ -21,11 +21,17 @@ struct AddCredentialSheet: View {
     @State private var redirectURI = "http://localhost:8477/callback"
     @State private var scopes = ""
 
+    @State private var otpSeed = ""
+    @State private var otpIssuer = ""
+    @State private var otpAccountName = ""
+    @State private var otpDigits = "6"
+    @State private var otpPeriod = "30"
+
     @State private var opaquePairs: [KVPair] = [KVPair()]
     @State private var errorMessage: String?
 
     private let providers = ["generic_api", "openai", "github", "slack", "feishu"]
-    private let authMethods = ["api_key", "oauth", "opaque"]
+    private let authMethods = ["api_key", "oauth", "otp", "opaque"]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -66,6 +72,14 @@ struct AddCredentialSheet: View {
                         Text("After saving, complete the flow with `passka auth <account_id>` in the CLI.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    }
+                case "otp":
+                    Section("OTP Config") {
+                        SecureField("Seed (base32)", text: $otpSeed)
+                        TextField("Issuer", text: $otpIssuer)
+                        TextField("Account Name", text: $otpAccountName)
+                        TextField("Digits", text: $otpDigits)
+                        TextField("Period Seconds", text: $otpPeriod)
                     }
                 default:
                     Section("Opaque Secret Fields") {
@@ -145,6 +159,26 @@ struct AddCredentialSheet: View {
                 clientSecret: clientSecret,
                 redirectURI: redirectURI,
                 scopes: scopes
+            )
+        case "otp":
+            guard !otpSeed.isEmpty else {
+                errorMessage = "OTP seed is required"
+                return
+            }
+            guard Int(otpDigits) != nil, Int(otpPeriod) != nil else {
+                errorMessage = "Digits and period must be numbers"
+                return
+            }
+            ok = store.addOTPAccount(
+                name: name,
+                provider: provider,
+                baseURL: baseURL,
+                description: description,
+                seed: otpSeed,
+                issuer: otpIssuer,
+                accountName: otpAccountName,
+                digits: otpDigits,
+                period: otpPeriod
             )
         default:
             let fields = opaquePairs.reduce(into: [String: String]()) { result, pair in

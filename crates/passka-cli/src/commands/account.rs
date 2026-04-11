@@ -1,6 +1,6 @@
 use anyhow::Result;
 use dialoguer::{Input, Password};
-use passka_core::types::{mask_value, OAuthMaterial};
+use passka_core::types::{mask_value, OAuthMaterial, OtpMaterial};
 use passka_core::{
     ApiKeyMaterial, AuthMethod, Broker, OpaqueSecretMaterial, ProviderKind, ProviderSecret,
     RegisterProviderAccount,
@@ -97,6 +97,37 @@ pub fn add(
                 anyhow::bail!("opaque account requires at least one field");
             }
             ProviderSecret::Opaque(OpaqueSecretMaterial { fields })
+        }
+        AuthMethod::Otp => {
+            let seed = Password::new()
+                .with_prompt("OTP seed (base32)")
+                .interact()?;
+            let issuer: String = Input::new()
+                .with_prompt("issuer (optional)")
+                .allow_empty(true)
+                .interact_text()?;
+            let account_name: String = Input::new()
+                .with_prompt("account name (optional)")
+                .allow_empty(true)
+                .interact_text()?;
+            let digits: u32 = Input::new()
+                .with_prompt("digits")
+                .default(6)
+                .interact_text()?;
+            let period: u64 = Input::new()
+                .with_prompt("period seconds")
+                .default(30)
+                .interact_text()?;
+            if seed.trim().is_empty() {
+                anyhow::bail!("OTP seed is required");
+            }
+            ProviderSecret::Otp(OtpMaterial {
+                seed,
+                issuer,
+                account_name,
+                digits,
+                period,
+            })
         }
     };
 

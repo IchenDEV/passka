@@ -8,6 +8,6 @@ pub use store::keychain::KeychainStore;
 pub use types::{
     AccessContext, AccessLease, ApiKeyMaterial, AuditEvent, AuditEventKind, AuditOutcome,
     AuthMethod, AuthorizationSession, BrokerPolicy, HttpProxyResponse, HttpRequestSpec,
-    OpaqueSecretMaterial, Principal, PrincipalKind, ProviderAccount, ProviderKind, ProviderSecret,
-    RegisterProviderAccount, ResourceGrant,
+    OpaqueSecretMaterial, OtpMaterial, Principal, PrincipalKind, ProviderAccount, ProviderKind,
+    ProviderSecret, RegisterProviderAccount, ResourceGrant,
 };

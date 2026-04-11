@@ -24,6 +24,8 @@ struct CredentialDetailView: View {
                 "refresh_token",
                 "expires_at",
             ]
+        case "otp":
+            return ["code", "seed", "issuer", "account_name", "digits", "period"]
         default:
             return ["value"]
         }
