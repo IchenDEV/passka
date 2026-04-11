@@ -859,6 +859,7 @@ fn materialize_forward_headers(
                     .context("invalid OAuth bearer token")?,
             );
         }
+        ProviderSecret::Otp(_) => anyhow::bail!("OTP secrets cannot be proxied over HTTP"),
     }
 
     Ok(materialized)
@@ -940,6 +941,7 @@ fn credential_fields(credential: &ProxyCredential) -> Result<HashMap<String, Str
             fields.insert("CLIENT_ID".into(), secret.client_id.clone());
             fields.insert("SCOPES".into(), secret.scopes.join(" "));
         }
+        ProviderSecret::Otp(_) => anyhow::bail!("OTP secrets cannot be proxied over HTTP"),
     }
 
     Ok(fields)
