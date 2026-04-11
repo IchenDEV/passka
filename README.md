@@ -1,50 +1,46 @@
 # passka
 
-Passka is a local Auth Broker for AI agents.
+[中文说明](README.zh-CN.md)
 
-Passka stores provider authorization material locally, evaluates policy for a principal, issues short-lived access leases, and can proxy HTTP requests on the agent's behalf. Agents do not receive long-lived secrets.
+Passka is a local passport for AI agents.
 
-## Architecture
+It lets an agent use services like OpenAI, GitHub, Slack, Feishu, or any HTTP API without handing the agent your long-lived API keys or OAuth refresh tokens. You keep the real credentials on your machine. Passka checks whether the agent is allowed to do the thing it asked for, creates a short-lived access lease, and can make the HTTP request on the agent's behalf.
 
-Passka vNext is built around broker-first objects:
+Think of it like a local 1Password-style broker for agents: the agent asks for a capability, not a secret.
 
-| Object | Meaning |
-| --- | --- |
-| `Principal` | A local human or agent identity, such as `principal:local-human` or `principal:local-agent`. |
-| `ProviderAccount` | A bound SaaS/API account, such as OpenAI, GitHub, Slack, Feishu, or a generic API provider. |
-| `ResourceGrant` | A resource pattern and allowed actions for one provider account. |
-| `BrokerPolicy` | Connects a principal to one or more grants, with lease duration and reveal permissions. |
-| `AccessLease` | A short-lived capability issued after policy approval. |
-| `AuditEvent` | A record of account registration, policy changes, access decisions, proxy calls, reveals, and OAuth actions. |
+## Why Use It
 
-Storage is split by sensitivity:
+AI agents often need to call real services. The unsafe version is simple: put API keys in environment variables and hope nothing prints or leaks them. Passka aims for a safer flow:
 
-| Data | Storage |
-| --- | --- |
-| Long-lived provider material | macOS Keychain, service `passka-broker` |
-| Broker state, policies, leases, audit | `~/.config/passka/broker/state.json` |
+1. You add a provider account, such as OpenAI or GitHub.
+2. You create a policy that says which local agent can access which resource.
+3. The agent asks Passka for access to that resource.
+4. Passka grants a short-lived lease if the policy allows it.
+5. Passka proxies the request, so the long-lived credential stays local.
+6. Passka records what happened in the audit log.
+
+## What Passka Protects
+
+- Long-lived provider material is stored in macOS Keychain under service `passka-broker`.
+- Broker state, policies, leases, and audit logs live in `~/.config/passka/broker/state.json`.
+- Agents receive access leases and proxied results, not API keys or refresh tokens.
+- Human reveal in the macOS app requires local biometric/device authentication.
 
 ## Quick Start
 
-Run the local daemon:
+Run the local broker:
 
 ```bash
 cargo run -p passka-cli -- broker serve --addr 127.0.0.1:8478
 ```
 
-Check health:
+Check that it is alive:
 
 ```bash
 curl http://127.0.0.1:8478/health
 ```
 
-List built-in principals:
-
-```bash
-cargo run -p passka-cli -- principal list
-```
-
-Register an API-key provider account:
+Add a provider account:
 
 ```bash
 cargo run -p passka-cli -- account add openai-prod \
@@ -53,18 +49,7 @@ cargo run -p passka-cli -- account add openai-prod \
   --base-url https://api.openai.com
 ```
 
-Register an OAuth provider account:
-
-```bash
-cargo run -p passka-cli -- account add slack-workspace \
-  --provider slack \
-  --auth oauth \
-  --base-url https://slack.com/api
-
-cargo run -p passka-cli -- auth <account_id>
-```
-
-Allow an agent to access a resource:
+Allow the default local agent to read OpenAI model resources:
 
 ```bash
 cargo run -p passka-cli -- policy allow \
@@ -75,7 +60,7 @@ cargo run -p passka-cli -- policy allow \
   --lease-seconds 300
 ```
 
-Request a lease:
+Ask for a short-lived lease:
 
 ```bash
 cargo run -p passka-cli -- request \
@@ -86,7 +71,7 @@ cargo run -p passka-cli -- request \
   --purpose "model discovery"
 ```
 
-Proxy an HTTP request through an approved lease:
+Use that lease to proxy a request:
 
 ```bash
 cargo run -p passka-cli -- proxy \
@@ -95,15 +80,57 @@ cargo run -p passka-cli -- proxy \
   --path /v1/models
 ```
 
-Inspect audit history:
+See what happened:
 
 ```bash
 cargo run -p passka-cli -- audit list --limit 20
 ```
 
-## Broker HTTP API
+## OAuth Accounts
 
-The daemon exposes a local JSON API for agents, MCP bridges, and future VFS drivers:
+For OAuth providers, add the account and then complete the browser-based authorization flow:
+
+```bash
+cargo run -p passka-cli -- account add slack-workspace \
+  --provider slack \
+  --auth oauth \
+  --base-url https://slack.com/api
+
+cargo run -p passka-cli -- auth <account_id>
+```
+
+Passka stores and refreshes OAuth material locally. Agents still request leases and proxy requests; they do not receive refresh tokens.
+
+## macOS App
+
+The macOS app is a broker console:
+
+- Browse provider accounts by provider.
+- Add API key, OAuth, and opaque provider accounts.
+- Reveal sensitive fields only after local authentication.
+- Inspect recent audit history for an account.
+
+Build it with:
+
+```bash
+cd app && swift build
+```
+
+## Concepts
+
+| Term | Plain meaning |
+| --- | --- |
+| Principal | Who is asking. Usually a local human or local agent. |
+| Provider account | The external account Passka can use, such as an OpenAI or GitHub account. |
+| Policy | The rule that says who can use which provider account for which resources. |
+| Resource | The thing being accessed, such as `openai/models/*`. |
+| Lease | A short-lived approval to do one kind of action. |
+| Proxy | Passka making the HTTP request while keeping the secret hidden. |
+| Audit event | A record of a grant, denial, reveal, refresh, or proxied request. |
+
+## HTTP API
+
+Agents and MCP bridges can use the local JSON API exposed by `passka broker serve`:
 
 ```text
 GET    /health
@@ -124,7 +151,7 @@ POST   /oauth/{account_id}/complete
 POST   /oauth/{account_id}/refresh
 ```
 
-Request a lease over HTTP:
+Request a lease:
 
 ```bash
 curl -s http://127.0.0.1:8478/access/request \
@@ -141,7 +168,7 @@ curl -s http://127.0.0.1:8478/access/request \
   }'
 ```
 
-Proxy a request over HTTP:
+Proxy a request:
 
 ```bash
 curl -s http://127.0.0.1:8478/http/proxy \
@@ -155,7 +182,7 @@ curl -s http://127.0.0.1:8478/http/proxy \
   }'
 ```
 
-## CLI Map
+## Useful Commands
 
 ```bash
 cargo run -p passka-cli -- principal list
@@ -174,22 +201,6 @@ cargo run -p passka-cli -- proxy --lease <lease_id> --method GET --path /path
 
 cargo run -p passka-cli -- audit list --limit 20
 cargo run -p passka-cli -- broker serve
-```
-
-## macOS App
-
-The app is now a broker console:
-
-- Browse provider accounts by provider.
-- Add API key, OAuth, and opaque provider accounts.
-- Reveal sensitive fields only after local biometric/device authentication.
-- Inspect recent audit history for an account.
-- Use the broker CLI bridge for all broker operations.
-
-Build it with:
-
-```bash
-cd app && swift build
 ```
 
 ## Development
