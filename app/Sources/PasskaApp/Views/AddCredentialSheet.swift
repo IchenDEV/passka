@@ -5,60 +5,92 @@ struct AddCredentialSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var name = ""
-    @State private var credType = "api_key"
+    @State private var provider = "generic_api"
+    @State private var authMethod = "api_key"
     @State private var description = ""
-    @State private var fields: [FieldInput] = []
-    @State private var sessionPairs: [KVPair] = [KVPair()]
-    @State private var sessionDomain = ""
+    @State private var baseURL = ""
+
+    @State private var apiKey = ""
+    @State private var headerName = "Authorization"
+    @State private var headerPrefix = "Bearer"
+
+    @State private var authorizeURL = ""
+    @State private var tokenURL = ""
+    @State private var clientID = ""
+    @State private var clientSecret = ""
+    @State private var redirectURI = "http://localhost:8477/callback"
+    @State private var scopes = ""
+
+    @State private var opaquePairs: [KVPair] = [KVPair()]
     @State private var errorMessage: String?
 
-    private let typeOptions = [
-        ("api_key", "API Key"),
-        ("password", "Password"),
-        ("session", "Session / Cookie"),
-        ("oauth", "OAuth"),
-    ]
+    private let providers = ["generic_api", "openai", "github", "slack", "feishu"]
+    private let authMethods = ["api_key", "oauth", "opaque"]
 
     var body: some View {
         VStack(spacing: 0) {
             Form {
-                Section("Basic Info") {
+                Section("Account") {
                     TextField("Name", text: $name)
-                    Picker("Type", selection: $credType) {
-                        ForEach(typeOptions, id: \.0) { id, label in
-                            Text(label).tag(id)
+                    Picker("Provider", selection: $provider) {
+                        ForEach(providers, id: \.self) { provider in
+                            Text(provider).tag(provider)
                         }
                     }
+                    Picker("Auth Method", selection: $authMethod) {
+                        ForEach(authMethods, id: \.self) { method in
+                            Text(method).tag(method)
+                        }
+                    }
+                    TextField("Base URL", text: $baseURL)
                     TextField("Description", text: $description)
                 }
 
-                if credType == "session" {
-                    sessionSection
-                } else {
-                    Section("Fields") {
-                        ForEach($fields) { $field in
+                switch authMethod {
+                case "api_key":
+                    Section("API Key Material") {
+                        SecureField("API Key", text: $apiKey)
+                        TextField("Header Name", text: $headerName)
+                        TextField("Header Prefix", text: $headerPrefix)
+                    }
+                case "oauth":
+                    Section("OAuth Config") {
+                        TextField("Authorize URL", text: $authorizeURL)
+                        TextField("Token URL", text: $tokenURL)
+                        TextField("Client ID", text: $clientID)
+                        SecureField("Client Secret", text: $clientSecret)
+                        TextField("Redirect URI", text: $redirectURI)
+                        TextField("Scopes (space-separated)", text: $scopes)
+                    }
+                    Section {
+                        Text("After saving, complete the flow with `passka auth <account_id>` in the CLI.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                default:
+                    Section("Opaque Secret Fields") {
+                        ForEach($opaquePairs) { $pair in
                             HStack {
-                                Text(field.name).frame(width: 120, alignment: .leading)
-                                if field.sensitive {
-                                    SecureField("Required", text: $field.value)
-                                } else {
-                                    TextField(field.optional ? "Optional" : "Required", text: $field.value)
+                                TextField("Field", text: $pair.key)
+                                    .frame(width: 150)
+                                SecureField("Value", text: $pair.value)
+                                Button(action: { opaquePairs.removeAll { $0.id == pair.id } }) {
+                                    Image(systemName: "minus.circle")
                                 }
+                                .buttonStyle(.borderless)
+                                .disabled(opaquePairs.count <= 1)
                             }
+                        }
+                        Button("Add Field") {
+                            opaquePairs.append(KVPair())
                         }
                     }
                 }
 
-                if credType == "oauth" {
-                    Section {
-                        Text("After saving, run `passka auth \(name.isEmpty ? "<name>" : name)` to complete authorization.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                if let err = errorMessage {
-                    Text(err).foregroundStyle(.red).font(.caption)
+                if let errorMessage {
+                    Text(errorMessage)
+                        .foregroundStyle(.red)
+                        .font(.caption)
                 }
             }
             .formStyle(.grouped)
@@ -73,101 +105,72 @@ struct AddCredentialSheet: View {
             }
             .padding()
         }
-        .frame(width: 500, height: credType == "oauth" ? 520 : 420)
-        .onChange(of: credType) { _, _ in updateFields() }
-        .onAppear { updateFields() }
-    }
-
-    private var sessionSection: some View {
-        Section("Session Data") {
-            TextField("Domain (required)", text: $sessionDomain)
-            ForEach($sessionPairs) { $pair in
-                HStack {
-                    TextField("Header name", text: $pair.key)
-                        .frame(width: 150)
-                    SecureField("Value", text: $pair.value)
-                    Button(action: { sessionPairs.removeAll { $0.id == pair.id } }) {
-                        Image(systemName: "minus.circle")
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(sessionPairs.count <= 1)
-                }
-            }
-            Button("Add header/cookie") {
-                sessionPairs.append(KVPair())
-            }
-        }
-    }
-
-    private func updateFields() {
-        let sensitive = Set(["password", "key", "secret",
-                             "token", "refresh_token", "client_secret"])
-        let required = requiredFields(for: credType)
-        let optional = optionalFields(for: credType)
-        fields = required.map { FieldInput(name: $0, sensitive: sensitive.contains($0), optional: false) }
-            + optional.map { FieldInput(name: $0, sensitive: sensitive.contains($0), optional: true) }
+        .frame(width: 520, height: authMethod == "oauth" ? 560 : 460)
     }
 
     private func save() {
-        var dict: [String: String] = [:]
+        let ok: Bool
+        switch authMethod {
+        case "api_key":
+            guard !apiKey.isEmpty else {
+                errorMessage = "API key is required"
+                return
+            }
+            ok = store.addAPIKeyAccount(
+                name: name,
+                provider: provider,
+                baseURL: baseURL,
+                description: description,
+                apiKey: apiKey,
+                headerName: headerName,
+                headerPrefix: headerPrefix
+            )
+        case "oauth":
+            guard !authorizeURL.isEmpty,
+                  !tokenURL.isEmpty,
+                  !clientID.isEmpty,
+                  !clientSecret.isEmpty
+            else {
+                errorMessage = "Authorize URL, token URL, client ID, and client secret are required"
+                return
+            }
+            ok = store.addOAuthAccount(
+                name: name,
+                provider: provider,
+                baseURL: baseURL,
+                description: description,
+                authorizeURL: authorizeURL,
+                tokenURL: tokenURL,
+                clientID: clientID,
+                clientSecret: clientSecret,
+                redirectURI: redirectURI,
+                scopes: scopes
+            )
+        default:
+            let fields = opaquePairs.reduce(into: [String: String]()) { result, pair in
+                if !pair.key.isEmpty && !pair.value.isEmpty {
+                    result[pair.key] = pair.value
+                }
+            }
+            guard !fields.isEmpty else {
+                errorMessage = "At least one opaque field is required"
+                return
+            }
+            ok = store.addOpaqueAccount(
+                name: name,
+                provider: provider,
+                baseURL: baseURL,
+                description: description,
+                fields: fields
+            )
+        }
 
-        if credType == "session" {
-            guard !sessionDomain.isEmpty else {
-                errorMessage = "Domain is required"
-                return
-            }
-            dict["domain"] = sessionDomain
-            let validPairs = sessionPairs.filter { !$0.key.isEmpty && !$0.value.isEmpty }
-            guard !validPairs.isEmpty else {
-                errorMessage = "At least one header/cookie entry is required"
-                return
-            }
-            for pair in validPairs {
-                dict[pair.key] = pair.value
-            }
+        if ok {
+            dismiss()
         } else {
-            for f in fields where !f.value.isEmpty {
-                dict[f.name] = f.value
-            }
-            let missing = fields.filter { !$0.optional && $0.value.isEmpty }
-            if !missing.isEmpty {
-                errorMessage = "Missing required fields: \(missing.map(\.name).joined(separator: ", "))"
-                return
-            }
-        }
-
-        let ok = PasskaBridge.addCredentialRaw(
-            name: name, type: credType, fields: dict, description: description
-        )
-        if ok { store.reload(); dismiss() }
-        else { errorMessage = "Failed to save credential" }
-    }
-
-    private func requiredFields(for type: String) -> [String] {
-        switch type {
-        case "api_key": return ["key"]
-        case "password": return ["username", "password"]
-        case "oauth": return ["authorize_url", "token_url", "client_id", "client_secret"]
-        default: return []
+            errorMessage = "Failed to save account"
         }
     }
-
-    private func optionalFields(for type: String) -> [String] {
-        switch type {
-        case "api_key": return ["secret", "endpoint"]
-        case "password": return ["url"]
-        case "oauth": return ["redirect_uri", "scopes"]
-        default: return []
-        }
-    }
-}
-
-struct FieldInput: Identifiable {
-    let id = UUID()
-    let name: String
-    let sensitive: Bool
-    let optional: Bool
-    var value = ""
 }
 
 struct KVPair: Identifiable {

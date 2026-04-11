@@ -1,18 +1,9 @@
 use anyhow::Result;
-use passka_core::types::CredentialType;
-use passka_core::IndexStore;
+use passka_core::Broker;
 
-pub fn run(name: &str) -> Result<()> {
-    let index = IndexStore::new()?;
-    let meta = index.get(name)?;
-
-    if meta.cred_type != CredentialType::OAuth {
-        anyhow::bail!("credential '{name}' is not oauth type, cannot refresh");
-    }
-
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(passka_core::oauth::refresh_token(name))?;
-
-    eprintln!("token refreshed successfully for '{name}'");
+pub fn run(account_id: &str) -> Result<()> {
+    let broker = Broker::new()?;
+    broker.refresh_account(account_id)?;
+    eprintln!("token refreshed successfully for '{account_id}'");
     Ok(())
 }

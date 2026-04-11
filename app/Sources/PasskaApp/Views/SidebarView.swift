@@ -3,34 +3,37 @@ import SwiftUI
 struct SidebarView: View {
     @EnvironmentObject var store: CredentialStore
 
-    private let types: [(id: String, label: String, icon: String)] = [
-        ("api_key", "API Keys", "key.fill"),
-        ("password", "Passwords", "person.badge.key.fill"),
-        ("session", "Sessions", "globe"),
-        ("oauth", "OAuth", "arrow.triangle.2.circlepath"),
-    ]
+    private var providers: [String] {
+        Array(Set(store.accounts.map(\.provider))).sorted()
+    }
 
     var body: some View {
-        List(selection: $store.selectedType) {
+        List(selection: $store.selectedProvider) {
             NavigationLink(value: nil as String?) {
-                Label {
-                    Text("All")
-                } icon: {
-                    Image(systemName: "tray.full.fill")
-                }
-                .badge(store.entries.count)
+                Label("All Accounts", systemImage: "person.text.rectangle")
+                    .badge(store.accounts.count)
             }
 
-            Section("Types") {
-                ForEach(types, id: \.id) { item in
-                    NavigationLink(value: Optional(item.id)) {
-                        Label(item.label, systemImage: item.icon)
-                            .badge(store.entries.filter { $0.credType == item.id }.count)
+            Section("Providers") {
+                ForEach(providers, id: \.self) { provider in
+                    NavigationLink(value: Optional(provider)) {
+                        Label(provider, systemImage: icon(for: provider))
+                            .badge(store.accounts.filter { $0.provider == provider }.count)
                     }
                 }
             }
         }
         .listStyle(.sidebar)
-        .navigationTitle("Passka")
+        .navigationTitle("Passka Broker")
+    }
+
+    private func icon(for provider: String) -> String {
+        switch provider {
+        case "openai": return "sparkles"
+        case "github": return "chevron.left.forwardslash.chevron.right"
+        case "slack": return "bubble.left.and.bubble.right"
+        case "feishu": return "building.2"
+        default: return "network"
+        }
     }
 }

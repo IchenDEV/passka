@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/passka-core",
     "crates/passka-cli",
-    "crates/passka-ffi",
 ]
 
 [workspace.package]

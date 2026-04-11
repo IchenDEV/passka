@@ -1,84 +1,179 @@
 import Foundation
-import Security
 
-/// Swift wrapper around Passka storage.
-/// Reads the index file and keychain directly for the GUI.
-/// CLI is only used for write operations that need interactive input.
 public enum PasskaBridge {
-
     private static let cliPath: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
             "\(home)/.cargo/bin/passka",
             "/usr/local/bin/passka",
             "/opt/homebrew/bin/passka",
+            "\(home)/projects/passka/target/debug/passka",
         ]
-        return candidates.first { FileManager.default.fileExists(atPath: $0) }
-            ?? "passka"
+        return candidates.first { FileManager.default.fileExists(atPath: $0) } ?? "passka"
     }()
 
-    private static let serviceName = "passka"
-
-    public static func listCredentials(typeFilter: String? = nil) -> [[String: Any]] {
-        readIndex(typeFilter: typeFilter)
+    public static func listAccounts() -> [[String: Any]] {
+        decodeArray(shell([cliPath, "account", "list"]))
     }
 
-    public static func getCredentialMeta(name: String) -> [String: Any]? {
-        let entries = readIndex()
-        return entries.first { ($0["name"] as? String) == name }
+    public static func getAccount(accountId: String) -> [String: Any]? {
+        decodeObject(shell([cliPath, "account", "show", accountId]))
     }
 
-    /// Read a credential field directly from the macOS keychain.
-    /// Requires Touch ID / authentication at the caller level.
-    public static func getCredentialValue(name: String, field: String) -> String? {
-        guard let data = readKeychainEntry(account: name) else { return nil }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let fields = json["fields"] as? [String: String]
-        else { return nil }
-        return fields[field]
+    public static func revealAccountField(
+        actorPrincipalId: String = "principal:local-human",
+        accountId: String,
+        field: String
+    ) -> String? {
+        let value = shell([
+            cliPath,
+            "account",
+            "reveal",
+            accountId,
+            "--field",
+            field,
+            "--principal",
+            actorPrincipalId,
+            "--raw",
+        ])
+        return value.isEmpty ? nil : value
     }
 
-    public static func addCredentialRaw(
-        name: String, type: String, fields: [String: String], description: String
+    public static func registerAPIKeyAccount(
+        name: String,
+        provider: String,
+        baseURL: String,
+        description: String,
+        apiKey: String,
+        headerName: String,
+        headerPrefix: String
     ) -> Bool {
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: ["fields": fields]),
-              let json = String(data: jsonData, encoding: .utf8) else { return false }
-        let fieldsArgs = fields.flatMap { ["-f", "\($0.key)=\($0.value)"] }
-        let _ = shell([cliPath, "add", name, "--type", type] + fieldsArgs)
-        return true
+        let args = [
+            cliPath,
+            "account",
+            "add",
+            name,
+            "--provider",
+            provider,
+            "--auth",
+            "api_key",
+            "--base-url",
+            baseURL,
+            "--description",
+            description,
+        ]
+        return runInteractive(
+            args,
+            input: "\(apiKey)\n\(headerName)\n\(headerPrefix)\n\n"
+        )
     }
 
-    public static func removeCredential(name: String) -> Bool {
-        let _ = shell([cliPath, "rm", "--yes", name])
-        return true
+    public static func registerOAuthAccount(
+        name: String,
+        provider: String,
+        baseURL: String,
+        description: String,
+        authorizeURL: String,
+        tokenURL: String,
+        clientID: String,
+        clientSecret: String,
+        redirectURI: String,
+        scopes: String
+    ) -> Bool {
+        let args = [
+            cliPath,
+            "account",
+            "add",
+            name,
+            "--provider",
+            provider,
+            "--auth",
+            "oauth",
+            "--base-url",
+            baseURL,
+            "--description",
+            description,
+        ]
+        return runInteractive(
+            args,
+            input: "\(authorizeURL)\n\(tokenURL)\n\(clientID)\n\(clientSecret)\n\(redirectURI)\n\(scopes)\n"
+        )
     }
 
-    // MARK: - Private
+    public static func registerOpaqueAccount(
+        name: String,
+        provider: String,
+        baseURL: String,
+        description: String,
+        fields: [String: String]
+    ) -> Bool {
+        var input = ""
+        for key in fields.keys.sorted() {
+            input += "\(key)\n\(fields[key] ?? "")\n"
+        }
+        input += "\n"
+        let args = [
+            cliPath,
+            "account",
+            "add",
+            name,
+            "--provider",
+            provider,
+            "--auth",
+            "opaque",
+            "--base-url",
+            baseURL,
+            "--description",
+            description,
+        ]
+        return runInteractive(args, input: input)
+    }
 
-    private static func readIndex(typeFilter: String? = nil) -> [[String: Any]] {
-        let configDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/passka/index.json")
-        guard let data = try? Data(contentsOf: configDir),
+    public static func removeAccount(accountId: String) -> Bool {
+        runStatus([cliPath, "account", "remove", accountId]) == 0
+    }
+
+    public static func listPrincipals() -> [[String: Any]] {
+        decodeArray(shell([cliPath, "principal", "list"]))
+    }
+
+    public static func addPrincipal(name: String, kind: String, description: String) -> Bool {
+        runStatus([
+            cliPath,
+            "principal",
+            "add",
+            name,
+            "--kind",
+            kind,
+            "--description",
+            description,
+        ]) == 0
+    }
+
+    public static func listPolicies() -> [[String: Any]] {
+        decodeArray(shell([cliPath, "policy", "list"]))
+    }
+
+    public static func listAuditEvents(limit: Int? = nil) -> [[String: Any]] {
+        var args = [cliPath, "audit", "list"]
+        if let limit {
+            args += ["--limit", "\(limit)"]
+        }
+        return decodeArray(shell(args))
+    }
+
+    private static func decodeArray(_ raw: String) -> [[String: Any]] {
+        guard let data = raw.data(using: .utf8),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else { return [] }
-        if let filter = typeFilter {
-            return arr.filter { ($0["cred_type"] as? String) == filter }
-        }
         return arr
     }
 
-    private static func readKeychainEntry(account: String) -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { return nil }
-        return result as? Data
+    private static func decodeObject(_ raw: String) -> [String: Any]? {
+        guard let data = raw.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return object
     }
 
     private static func shell(_ args: [String]) -> String {
@@ -91,6 +186,37 @@ public enum PasskaBridge {
         try? proc.run()
         proc.waitUntilExit()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private static func runStatus(_ args: [String]) -> Int32 {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: args[0])
+        proc.arguments = Array(args.dropFirst())
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+        return proc.terminationStatus
+    }
+
+    private static func runInteractive(_ args: [String], input: String) -> Bool {
+        let proc = Process()
+        let stdin = Pipe()
+        proc.executableURL = URL(fileURLWithPath: args[0])
+        proc.arguments = Array(args.dropFirst())
+        proc.standardInput = stdin
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+            stdin.fileHandleForWriting.write(Data(input.utf8))
+            try? stdin.fileHandleForWriting.close()
+            proc.waitUntilExit()
+            return proc.terminationStatus == 0
+        } catch {
+            return false
+        }
     }
 }

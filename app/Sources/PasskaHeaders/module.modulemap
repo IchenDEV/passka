@@ -1,4 +1,0 @@
-module PasskaHeaders {
-    header "passka_ffi.h"
-    export *
-}

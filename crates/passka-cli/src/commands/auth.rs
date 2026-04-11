@@ -1,91 +1,23 @@
 use anyhow::{Context, Result};
-use passka_core::types::CredentialType;
-use passka_core::{IndexStore, KeychainStore};
+use dialoguer::Input;
+use passka_core::Broker;
 use rand::Rng;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
-pub fn run(name: &str) -> Result<()> {
-    let index = IndexStore::new()?;
-    let meta = index.get(name)?;
-
-    if meta.cred_type != CredentialType::OAuth {
-        anyhow::bail!("credential '{name}' is not oauth type");
-    }
-
-    let data = KeychainStore::get(name)?;
-    let authorize_url = data
-        .fields
-        .get("authorize_url")
-        .filter(|v| !v.is_empty())
-        .context("missing authorize_url — re-add this credential")?
-        .clone();
-    let token_url = data
-        .fields
-        .get("token_url")
-        .filter(|v| !v.is_empty())
-        .context("missing token_url — re-add this credential")?
-        .clone();
-    let client_id = data
-        .fields
-        .get("client_id")
-        .filter(|v| !v.is_empty())
-        .context("missing client_id")?
-        .clone();
-    let client_secret = data
-        .fields
-        .get("client_secret")
-        .filter(|v| !v.is_empty())
-        .context("missing client_secret")?
-        .clone();
-    let redirect_uri = data
-        .fields
-        .get("redirect_uri")
-        .cloned()
-        .unwrap_or_else(|| "http://localhost:8477/callback".into());
-    let scopes = data
-        .fields
-        .get("scopes")
-        .cloned()
-        .unwrap_or_default();
-
+pub fn run(account_id: &str) -> Result<()> {
+    let broker = Broker::new()?;
+    let session = broker.start_authorization(account_id)?;
+    let redirect_uri = broker
+        .reveal_sensitive_field("principal:local-human", account_id, "redirect_uri")
+        .unwrap_or_else(|_| "http://localhost:8477/callback".into());
     let state = generate_state();
+    let auth_url = append_state(&session.authorization_url, &state)?;
 
-    let auth_url = build_auth_url(&authorize_url, &client_id, &redirect_uri, &scopes, &state);
-
-    let rt = tokio::runtime::Runtime::new()?;
-    let code = rt.block_on(async {
-        get_authorization_code(&auth_url, &redirect_uri, &state).await
-    })?;
-
-    eprintln!("exchanging code for token...");
-    let token_body = rt.block_on(async {
-        passka_core::oauth::exchange_code(
-            &token_url,
-            &code,
-            &client_id,
-            &client_secret,
-            &redirect_uri,
-        )
-        .await
-    })?;
-
-    let access_token = token_body["access_token"]
-        .as_str()
-        .context("no access_token in response")?;
-    KeychainStore::update_field(name, "token", access_token)?;
-
-    if let Some(refresh_token) = token_body["refresh_token"].as_str() {
-        KeychainStore::update_field(name, "refresh_token", refresh_token)?;
-    }
-
-    if let Some(expires_in) = token_body["expires_in"].as_i64() {
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in);
-        KeychainStore::update_field(name, "expires_at", &expires_at.to_rfc3339())?;
-    }
-
-    index.update(name, |_| {})?;
-    eprintln!("OAuth authorization complete for '{name}'");
+    let runtime = tokio::runtime::Runtime::new()?;
+    let code = runtime.block_on(async { get_authorization_code(&auth_url, &redirect_uri, &state).await })?;
+    broker.complete_authorization(account_id, &code)?;
+    eprintln!("OAuth authorization complete for '{account_id}'");
     Ok(())
 }
 
@@ -103,23 +35,10 @@ fn generate_state() -> String {
         .collect()
 }
 
-fn build_auth_url(
-    authorize_url: &str,
-    client_id: &str,
-    redirect_uri: &str,
-    scopes: &str,
-    state: &str,
-) -> String {
-    let mut url = url::Url::parse(authorize_url).expect("invalid authorize_url");
-    url.query_pairs_mut()
-        .append_pair("response_type", "code")
-        .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("state", state);
-    if !scopes.is_empty() {
-        url.query_pairs_mut().append_pair("scope", scopes);
-    }
-    url.to_string()
+fn append_state(auth_url: &str, state: &str) -> Result<String> {
+    let mut url = url::Url::parse(auth_url).context("invalid authorization URL")?;
+    url.query_pairs_mut().append_pair("state", state);
+    Ok(url.to_string())
 }
 
 async fn get_authorization_code(
@@ -150,9 +69,7 @@ async fn get_authorization_code(
                 async move {
                     let state = params.get("state").cloned().unwrap_or_default();
                     if state != expected {
-                        return axum::response::Html(
-                            "<h2>Error: state mismatch</h2>".to_string(),
-                        );
+                        return axum::response::Html("<h2>Error: state mismatch</h2>".to_string());
                     }
                     match params.get("code") {
                         Some(code) => {
@@ -164,9 +81,9 @@ async fn get_authorization_code(
                                     .to_string(),
                             )
                         }
-                        None => axum::response::Html(
-                            "<h2>Error: no code parameter</h2>".to_string(),
-                        ),
+                        None => {
+                            axum::response::Html("<h2>Error: no code parameter</h2>".to_string())
+                        }
                     }
                 }
             },
@@ -174,10 +91,8 @@ async fn get_authorization_code(
     );
 
     let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await {
-        Ok(l) => l,
-        Err(_) => {
-            return fallback_manual_code(auth_url).await;
-        }
+        Ok(listener) => listener,
+        Err(_) => return fallback_manual_code(auth_url).await,
     };
 
     eprintln!("opening browser for authorization...");
@@ -188,22 +103,18 @@ async fn get_authorization_code(
     let server = axum::serve(listener, app);
 
     tokio::select! {
-        result = rx => {
-            result.context("callback channel closed")
-        }
+        result = rx => result.context("callback channel closed"),
         _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
             eprintln!("timeout waiting for callback, falling back to manual entry");
             fallback_manual_code(auth_url).await
         }
-        _ = server => {
-            anyhow::bail!("server shut down unexpectedly")
-        }
+        _ = server => anyhow::bail!("server shut down unexpectedly"),
     }
 }
 
 async fn fallback_manual_code(auth_url: &str) -> Result<String> {
     eprintln!("please visit this URL to authorize:\n{auth_url}\n");
-    let code: String = dialoguer::Input::new()
+    let code: String = Input::new()
         .with_prompt("paste the authorization code here")
         .interact_text()?;
     Ok(code)

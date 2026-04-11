@@ -8,27 +8,14 @@ let package = Package(
         .executable(name: "PasskaApp", targets: ["PasskaApp"]),
     ],
     targets: [
-        .systemLibrary(
-            name: "PasskaHeaders",
-            path: "Sources/PasskaHeaders"
-        ),
         .target(
             name: "PasskaBridge",
-            dependencies: ["PasskaHeaders"],
             path: "Sources/PasskaBridge"
         ),
         .executableTarget(
             name: "PasskaApp",
             dependencies: ["PasskaBridge"],
-            path: "Sources/PasskaApp",
-            linkerSettings: [
-                .unsafeFlags([
-                    "-L../../target/release",
-                    "-lpasska_ffi",
-                ]),
-                .linkedFramework("Security"),
-                .linkedFramework("LocalAuthentication"),
-            ]
+            path: "Sources/PasskaApp"
         ),
     ]
 )

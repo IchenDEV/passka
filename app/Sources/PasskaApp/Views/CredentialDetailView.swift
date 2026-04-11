@@ -3,25 +3,49 @@ import AppKit
 
 struct CredentialDetailView: View {
     @EnvironmentObject var store: CredentialStore
-    let entry: CredentialEntry
+    let entry: AccountEntry
 
     @State private var revealedFields: [String: String] = [:]
     @State private var hideTask: Task<Void, Never>?
 
     private var fields: [String] {
-        fieldNamesForType(entry.credType)
+        switch entry.authMethod {
+        case "api_key":
+            return ["api_key", "header_name", "header_prefix", "secret"]
+        case "oauth":
+            return [
+                "authorize_url",
+                "token_url",
+                "client_id",
+                "client_secret",
+                "redirect_uri",
+                "scopes",
+                "access_token",
+                "refresh_token",
+                "expires_at",
+            ]
+        default:
+            return ["value"]
+        }
+    }
+
+    private var relatedAudit: [AuditEntry] {
+        store.audits(for: entry)
     }
 
     var body: some View {
         Form {
-            Section("Metadata") {
+            Section("Account") {
                 LabeledContent("Name", value: entry.name)
-                LabeledContent("Type", value: entry.credType)
+                LabeledContent("Provider", value: entry.provider)
+                LabeledContent("Auth Method", value: entry.authMethod)
+                LabeledContent("Base URL", value: entry.baseURL.isEmpty ? "—" : entry.baseURL)
                 LabeledContent("Description", value: entry.description.isEmpty ? "—" : entry.description)
+                LabeledContent("Scopes", value: entry.scopes.isEmpty ? "—" : entry.scopes.joined(separator: ", "))
                 LabeledContent("Created", value: entry.createdAt)
             }
 
-            Section("Fields") {
+            Section("Sensitive Material") {
                 ForEach(fields, id: \.self) { field in
                     HStack {
                         Text(field).frame(width: 120, alignment: .leading)
@@ -57,24 +81,45 @@ struct CredentialDetailView: View {
                 }
             }
 
-            Section("Environment Variables") {
-                ForEach(Array(entry.envVars.sorted(by: { $0.key < $1.key })), id: \.key) { field, envName in
-                    LabeledContent(field, value: "$\(envName)")
+            Section("Audit") {
+                if relatedAudit.isEmpty {
+                    Text("No audit events yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(relatedAudit.prefix(8)) { event in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(event.kind)
+                                .font(.headline)
+                            Text(event.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(event.timestamp)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+
+            Section {
+                Button("Remove Account", role: .destructive) {
+                    store.remove(accountId: entry.id)
                 }
             }
         }
         .formStyle(.grouped)
         .navigationTitle(entry.name)
-        .onChange(of: entry) { _, _ in
+        .onChange(of: entry.id) { _ in
             revealedFields.removeAll()
             hideTask?.cancel()
         }
     }
 
     private func revealField(_ field: String) {
-        AuthManager.authenticate(reason: "Reveal credential value") { success in
+        AuthManager.authenticate(reason: "Reveal broker-managed sensitive material") { success in
             guard success else { return }
-            if let val = store.getValue(name: entry.name, field: field) {
+            if let val = store.revealValue(accountId: entry.id, field: field), !val.isEmpty {
                 revealedFields[field] = val
                 scheduleAutoHide()
             }
@@ -99,17 +144,6 @@ struct CredentialDetailView: View {
             if NSPasteboard.general.string(forType: .string) == value {
                 NSPasteboard.general.clearContents()
             }
-        }
-    }
-
-    private func fieldNamesForType(_ type: String) -> [String] {
-        switch type {
-        case "api_key": return ["key", "secret", "endpoint"]
-        case "password": return ["username", "password", "url"]
-        case "session": return Array(entry.envVars.keys.sorted())
-        case "oauth": return ["token", "refresh_token", "token_url", "authorize_url",
-                              "client_id", "client_secret", "redirect_uri", "scopes", "expires_at"]
-        default: return Array(entry.envVars.keys.sorted())
         }
     }
 }

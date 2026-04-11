@@ -1,124 +1,201 @@
 # passka
 
-AI Agent 友好的凭据管理工具。以 macOS Keychain 为后端，支持 4 种凭据类型，核心特色是 `exec` 注入模式 — 凭据不进入 AI 上下文。
+Passka is a local Auth Broker for AI agents.
 
-## 安装
+Passka stores provider authorization material locally, evaluates policy for a principal, issues short-lived access leases, and can proxy HTTP requests on the agent's behalf. Agents do not receive long-lived secrets.
 
-```bash
-cargo install --path crates/passka-cli
-```
+## Architecture
 
-安装后 `passka` 命令可用。
+Passka vNext is built around broker-first objects:
 
-## 支持的凭据类型
+| Object | Meaning |
+| --- | --- |
+| `Principal` | A local human or agent identity, such as `principal:local-human` or `principal:local-agent`. |
+| `ProviderAccount` | A bound SaaS/API account, such as OpenAI, GitHub, Slack, Feishu, or a generic API provider. |
+| `ResourceGrant` | A resource pattern and allowed actions for one provider account. |
+| `BrokerPolicy` | Connects a principal to one or more grants, with lease duration and reveal permissions. |
+| `AccessLease` | A short-lived capability issued after policy approval. |
+| `AuditEvent` | A record of account registration, policy changes, access decisions, proxy calls, reveals, and OAuth actions. |
 
-| 类型 | 字段 | 用途 |
-|------|------|------|
-| `api_key` | key, secret?, endpoint? | API 密钥（支持 AK/SK 双密钥） |
-| `password` | username, password, url? | 用户名密码对 |
-| `session` | domain + 动态 KV 对 | 浏览器 Cookie / Header / Session |
-| `oauth` | authorize_url, token_url, client_id, client_secret, ... | OAuth 协议（支持自动刷新） |
+Storage is split by sensitivity:
 
-## CLI 使用
+| Data | Storage |
+| --- | --- |
+| Long-lived provider material | macOS Keychain, service `passka-broker` |
+| Broker state, policies, leases, audit | `~/.config/passka/broker/state.json` |
 
-### 添加凭据
+## Quick Start
 
-```bash
-passka add openai --type api_key
-# 引导式输入：key → 是否有 secret → endpoint
-
-passka add github --type password --description "GitHub account"
-# 引导式输入：username → password → URL
-
-passka add jira --type session --description "Jira session"
-# 引导式输入：domain → 循环添加 header/cookie KV 对
-
-passka add slack --type oauth --description "Slack workspace"
-# 引导式输入：authorize_url → token_url → client_id → client_secret → redirect_uri → scopes
-```
-
-### OAuth 授权
-
-OAuth 凭据需要两步完成：
+Run the local daemon:
 
 ```bash
-passka add slack --type oauth          # 第一步：配置端点和客户端凭证
-passka auth slack                      # 第二步：浏览器授权流程（自动启动本地回调服务器）
+cargo run -p passka-cli -- broker serve --addr 127.0.0.1:8478
 ```
 
-### 带凭据执行命令（推荐）
+Check health:
 
 ```bash
-# 单凭据注入（输出自动脱敏）
-passka exec openai -- curl -s \
-  -H "Authorization: Bearer $OPENAI_API_KEY" \
-  https://api.openai.com/v1/models
-
-# 多凭据同时注入
-passka exec openai github -- python pipeline.py
-
-# 关闭脱敏（仅在需要原始输出时使用）
-passka exec --no-redact openai -- python trusted_script.py
+curl http://127.0.0.1:8478/health
 ```
 
-### 查看和管理
+List built-in principals:
 
 ```bash
-passka list                    # 列出所有凭据（元数据）
-passka list --type api_key     # 按类型过滤
-passka show openai             # 显示详情（敏感字段脱敏）
-passka update openai --field key  # 更新字段
-passka rm openai               # 删除
-passka refresh slack           # 刷新 OAuth Token
+cargo run -p passka-cli -- principal list
 ```
 
-## 隐私模型
+Register an API-key provider account:
 
-`passka exec` 是唯一的凭据访问方式：
+```bash
+cargo run -p passka-cli -- account add openai-prod \
+  --provider openai \
+  --auth api_key \
+  --base-url https://api.openai.com
+```
 
-- 凭据注入为子进程的环境变量，不经过 stdout
-- 输出默认脱敏：子进程 stdout/stderr 中的敏感值自动替换为 `[REDACTED]`（`--no-redact` 关闭）
-- `show` 命令只展示脱敏后的值
-- `refresh` 命令不输出 token 值
+Register an OAuth provider account:
 
-AI Skill 硬约束确保 Agent 只通过 `exec` 访问凭据，禁止生成打印敏感值的代码。
+```bash
+cargo run -p passka-cli -- account add slack-workspace \
+  --provider slack \
+  --auth oauth \
+  --base-url https://slack.com/api
+
+cargo run -p passka-cli -- auth <account_id>
+```
+
+Allow an agent to access a resource:
+
+```bash
+cargo run -p passka-cli -- policy allow \
+  --principal principal:local-agent \
+  --account <account_id> \
+  --resource openai/models/* \
+  --actions read \
+  --lease-seconds 300
+```
+
+Request a lease:
+
+```bash
+cargo run -p passka-cli -- request \
+  --principal principal:local-agent \
+  --resource openai/models/gpt-4.1 \
+  --action read \
+  --environment local \
+  --purpose "model discovery"
+```
+
+Proxy an HTTP request through an approved lease:
+
+```bash
+cargo run -p passka-cli -- proxy \
+  --lease <lease_id> \
+  --method GET \
+  --path /v1/models
+```
+
+Inspect audit history:
+
+```bash
+cargo run -p passka-cli -- audit list --limit 20
+```
+
+## Broker HTTP API
+
+The daemon exposes a local JSON API for agents, MCP bridges, and future VFS drivers:
+
+```text
+GET    /health
+GET    /principals
+POST   /principals
+GET    /accounts
+POST   /accounts
+GET    /accounts/{account_id}
+DELETE /accounts/{account_id}
+POST   /accounts/{account_id}/reveal
+GET    /policies
+POST   /policies/allow
+GET    /audit?limit=20
+POST   /access/request
+POST   /http/proxy
+POST   /oauth/{account_id}/start
+POST   /oauth/{account_id}/complete
+POST   /oauth/{account_id}/refresh
+```
+
+Request a lease over HTTP:
+
+```bash
+curl -s http://127.0.0.1:8478/access/request \
+  -H 'content-type: application/json' \
+  -d '{
+    "principal_id": "principal:local-agent",
+    "resource": "openai/models/gpt-4.1",
+    "action": "read",
+    "context": {
+      "environment": "local",
+      "purpose": "model discovery",
+      "source": "mcp"
+    }
+  }'
+```
+
+Proxy a request over HTTP:
+
+```bash
+curl -s http://127.0.0.1:8478/http/proxy \
+  -H 'content-type: application/json' \
+  -d '{
+    "lease_id": "<lease_id>",
+    "request": {
+      "method": "GET",
+      "path": "/v1/models"
+    }
+  }'
+```
+
+## CLI Map
+
+```bash
+cargo run -p passka-cli -- principal list
+cargo run -p passka-cli -- principal add <name> --kind agent
+
+cargo run -p passka-cli -- account list
+cargo run -p passka-cli -- account show <account_id>
+cargo run -p passka-cli -- account reveal <account_id> --field api_key
+cargo run -p passka-cli -- account remove <account_id>
+
+cargo run -p passka-cli -- policy list
+cargo run -p passka-cli -- policy allow --principal <principal_id> --account <account_id> --resource <pattern> --actions read
+
+cargo run -p passka-cli -- request --principal <principal_id> --resource <resource> --action <action>
+cargo run -p passka-cli -- proxy --lease <lease_id> --method GET --path /path
+
+cargo run -p passka-cli -- audit list --limit 20
+cargo run -p passka-cli -- broker serve
+```
 
 ## macOS App
 
-SwiftUI 原生应用，提供图形界面管理凭据：
+The app is now a broker console:
 
-- 三栏布局：类型侧边栏 → 凭据列表 → 详情面板
-- Touch ID 指纹验证后才能查看真实值
-- 值显示 30 秒后自动隐藏
-- 复制到剪贴板 60 秒后自动清除
+- Browse provider accounts by provider.
+- Add API key, OAuth, and opaque provider accounts.
+- Reveal sensitive fields only after local biometric/device authentication.
+- Inspect recent audit history for an account.
+- Use the broker CLI bridge for all broker operations.
 
-构建 App：
+Build it with:
 
 ```bash
-cargo build --release -p passka-ffi
 cd app && swift build
 ```
 
-## AI Agent 集成
-
-安装 Cursor Skill 后，AI 会自动使用 `passka exec` 模式访问凭据，确保密钥不进入对话上下文。
+## Development
 
 ```bash
-# AI 生成的典型命令
-passka exec openai -- curl -s -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models
-
-# 多凭据场景
-passka exec openai github -- python deploy.py
-
-# 输出默认脱敏，无需额外参数
-passka exec openai -- python test_auth.py
+cargo build
+cargo test --workspace
+cd app && swift build
 ```
-
-## 存储架构
-
-- **元数据索引**: `~/.config/passka/index.json`
-- **敏感数据**: macOS Keychain（service: `passka`）
-
-## License
-
-MIT

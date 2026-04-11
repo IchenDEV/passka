@@ -1,51 +1,43 @@
-use crate::types::CredentialData;
 use anyhow::{Context, Result};
-
-const SERVICE_NAME: &str = "passka";
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 pub struct KeychainStore;
 
 impl KeychainStore {
-    pub fn set(name: &str, data: &CredentialData) -> Result<()> {
-        let json = serde_json::to_string(data)?;
-        let entry = keyring::Entry::new(SERVICE_NAME, name)
+    pub fn set_json<T: Serialize>(service: &str, account: &str, value: &T) -> Result<()> {
+        let json = serde_json::to_string(value)?;
+        Self::set_password(service, account, &json)
+    }
+
+    pub fn get_json<T: DeserializeOwned>(service: &str, account: &str) -> Result<T> {
+        let json = Self::get_password(service, account)?;
+        serde_json::from_str(&json).context("failed to decode stored keychain payload")
+    }
+
+    pub fn set_password(service: &str, account: &str, value: &str) -> Result<()> {
+        let entry = keyring::Entry::new(service, account)
             .context("failed to create keychain entry")?;
         entry
-            .set_password(&json)
-            .context("failed to store credential in keychain")?;
+            .set_password(value)
+            .context("failed to store value in keychain")?;
         Ok(())
     }
 
-    pub fn get(name: &str) -> Result<CredentialData> {
+    pub fn get_password(service: &str, account: &str) -> Result<String> {
         let entry =
-            keyring::Entry::new(SERVICE_NAME, name).context("failed to create keychain entry")?;
-        let json = entry
+            keyring::Entry::new(service, account).context("failed to create keychain entry")?;
+        entry
             .get_password()
-            .context("credential not found in keychain")?;
-        let data: CredentialData = serde_json::from_str(&json)?;
-        Ok(data)
+            .context("value not found in keychain")
     }
 
-    pub fn get_field(name: &str, field: &str) -> Result<String> {
-        let data = Self::get(name)?;
-        data.fields
-            .get(field)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("field '{field}' not found in credential '{name}'"))
-    }
-
-    pub fn update_field(name: &str, field: &str, value: &str) -> Result<()> {
-        let mut data = Self::get(name)?;
-        data.fields.insert(field.to_string(), value.to_string());
-        Self::set(name, &data)
-    }
-
-    pub fn delete(name: &str) -> Result<()> {
+    pub fn delete(service: &str, account: &str) -> Result<()> {
         let entry =
-            keyring::Entry::new(SERVICE_NAME, name).context("failed to create keychain entry")?;
+            keyring::Entry::new(service, account).context("failed to create keychain entry")?;
         entry
             .delete_credential()
-            .context("failed to delete credential from keychain")?;
+            .context("failed to delete value from keychain")?;
         Ok(())
     }
 }
