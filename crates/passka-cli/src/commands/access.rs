@@ -22,8 +22,10 @@ pub fn request(args: RequestArgs) -> Result<()> {
 pub fn proxy(args: ProxyArgs) -> Result<()> {
     let broker = Broker::new()?;
     let headers = parse_headers(&args.headers)?;
-    let response = broker.proxy_http(
+    let extra_leases = parse_extra_leases(&args.extra_leases)?;
+    let response = broker.proxy_http_with_leases(
         &args.lease,
+        extra_leases,
         HttpRequestSpec {
             method: args.method,
             path: args.path,
@@ -33,6 +35,17 @@ pub fn proxy(args: ProxyArgs) -> Result<()> {
     )?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+fn parse_extra_leases(values: &[String]) -> Result<HashMap<String, String>> {
+    let mut leases = HashMap::new();
+    for value in values {
+        let (alias, lease_id) = value.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("invalid extra lease '{value}', expected alias=lease_id")
+        })?;
+        leases.insert(alias.trim().to_string(), lease_id.trim().to_string());
+    }
+    Ok(leases)
 }
 
 fn parse_headers(values: &[String]) -> Result<HashMap<String, String>> {

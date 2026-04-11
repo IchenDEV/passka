@@ -150,6 +150,8 @@ pub struct ProxyArgs {
     pub path: String,
     #[arg(long = "header")]
     pub headers: Vec<String>,
+    #[arg(long = "extra-lease")]
+    pub extra_leases: Vec<String>,
     #[arg(long)]
     pub body: Option<String>,
 }
