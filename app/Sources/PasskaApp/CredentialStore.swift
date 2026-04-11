@@ -160,6 +160,32 @@ final class CredentialStore: ObservableObject {
         return ok
     }
 
+    func addOTPAccount(
+        name: String,
+        provider: String,
+        baseURL: String,
+        description: String,
+        seed: String,
+        issuer: String,
+        accountName: String,
+        digits: String,
+        period: String
+    ) -> Bool {
+        let ok = PasskaBridge.registerOTPAccount(
+            name: name,
+            provider: provider,
+            baseURL: baseURL,
+            description: description,
+            seed: seed,
+            issuer: issuer,
+            accountName: accountName,
+            digits: digits,
+            period: period
+        )
+        if ok { reload() }
+        return ok
+    }
+
     func audits(for account: AccountEntry) -> [AuditEntry] {
         auditEvents.filter { $0.resource.contains(account.id) || $0.resource.contains(account.name) }
     }

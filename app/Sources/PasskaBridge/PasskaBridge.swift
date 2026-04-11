@@ -129,6 +129,37 @@ public enum PasskaBridge {
         return runInteractive(args, input: input)
     }
 
+    public static func registerOTPAccount(
+        name: String,
+        provider: String,
+        baseURL: String,
+        description: String,
+        seed: String,
+        issuer: String,
+        accountName: String,
+        digits: String,
+        period: String
+    ) -> Bool {
+        let args = [
+            cliPath,
+            "account",
+            "add",
+            name,
+            "--provider",
+            provider,
+            "--auth",
+            "otp",
+            "--base-url",
+            baseURL,
+            "--description",
+            description,
+        ]
+        return runInteractive(
+            args,
+            input: "\(seed)\n\(issuer)\n\(accountName)\n\(digits)\n\(period)\n"
+        )
+    }
+
     public static func removeAccount(accountId: String) -> Bool {
         runStatus([cliPath, "account", "remove", accountId]) == 0
     }

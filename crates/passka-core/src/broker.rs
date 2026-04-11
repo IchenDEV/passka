@@ -107,6 +107,7 @@ impl Broker {
         if state.accounts.iter().any(|account| account.name == request.name) {
             anyhow::bail!("account '{}' already exists", request.name);
         }
+        request.secret.validate()?;
 
         let now = now();
         let account = ProviderAccount {
@@ -657,6 +658,7 @@ fn apply_auth(
             }
             request.bearer_auth(&secret.access_token)
         }
+        ProviderSecret::Otp(_) => anyhow::bail!("OTP secrets cannot be proxied over HTTP"),
     })
 }
 

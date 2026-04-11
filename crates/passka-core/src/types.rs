@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +87,7 @@ pub enum AuthMethod {
     Opaque,
     ApiKey,
     OAuth,
+    Otp,
 }
 
 impl AuthMethod {
@@ -94,6 +96,7 @@ impl AuthMethod {
             Self::Opaque => "opaque",
             Self::ApiKey => "api_key",
             Self::OAuth => "oauth",
+            Self::Otp => "otp",
         }
     }
 }
@@ -112,8 +115,9 @@ impl std::str::FromStr for AuthMethod {
             "opaque" => Ok(Self::Opaque),
             "api_key" => Ok(Self::ApiKey),
             "oauth" => Ok(Self::OAuth),
+            "otp" => Ok(Self::Otp),
             _ => Err(format!(
-                "unknown auth method '{s}'. valid: opaque, api_key, oauth"
+                "unknown auth method '{s}'. valid: opaque, api_key, oauth, otp"
             )),
         }
     }
@@ -189,19 +193,49 @@ pub struct OpaqueSecretMaterial {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OtpMaterial {
+    pub seed: String,
+    #[serde(default)]
+    pub issuer: String,
+    #[serde(default)]
+    pub account_name: String,
+    #[serde(default = "default_otp_digits")]
+    pub digits: u32,
+    #[serde(default = "default_otp_period")]
+    pub period: u64,
+}
+
+fn default_otp_digits() -> u32 {
+    6
+}
+
+fn default_otp_period() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderSecret {
     Opaque(OpaqueSecretMaterial),
     ApiKey(ApiKeyMaterial),
     OAuth(OAuthMaterial),
+    Otp(OtpMaterial),
 }
 
 impl ProviderSecret {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Self::Otp(secret) = self {
+            let _ = totp_at(&secret.seed, 0, secret.digits, secret.period)?;
+        }
+        Ok(())
+    }
+
     pub fn auth_method(&self) -> AuthMethod {
         match self {
             Self::Opaque(_) => AuthMethod::Opaque,
             Self::ApiKey(_) => AuthMethod::ApiKey,
             Self::OAuth(_) => AuthMethod::OAuth,
+            Self::Otp(_) => AuthMethod::Otp,
         }
     }
 
@@ -227,6 +261,17 @@ impl ProviderSecret {
                 }
                 "expires_at" if !secret.expires_at.is_empty() => Some(secret.expires_at.clone()),
                 "scopes" => Some(secret.scopes.join(" ")),
+                _ => None,
+            },
+            Self::Otp(secret) => match field {
+                "code" => current_totp(&secret.seed, secret.digits, secret.period).ok(),
+                "seed" => Some(secret.seed.clone()),
+                "issuer" if !secret.issuer.is_empty() => Some(secret.issuer.clone()),
+                "account_name" if !secret.account_name.is_empty() => {
+                    Some(secret.account_name.clone())
+                }
+                "digits" => Some(secret.digits.to_string()),
+                "period" => Some(secret.period.to_string()),
                 _ => None,
             },
         }
@@ -256,8 +301,66 @@ impl ProviderSecret {
                 "refresh_token".into(),
                 "expires_at".into(),
             ],
+            Self::Otp(_) => vec![
+                "code".into(),
+                "seed".into(),
+                "issuer".into(),
+                "account_name".into(),
+                "digits".into(),
+                "period".into(),
+            ],
         }
     }
+}
+
+fn current_totp(seed: &str, digits: u32, period: u64) -> anyhow::Result<String> {
+    let epoch_seconds = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    totp_at(seed, epoch_seconds, digits, period)
+}
+
+fn totp_at(seed: &str, epoch_seconds: u64, digits: u32, period: u64) -> anyhow::Result<String> {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+
+    if !(6..=10).contains(&digits) {
+        anyhow::bail!("OTP digits must be between 6 and 10");
+    }
+    if period == 0 {
+        anyhow::bail!("OTP period must be greater than zero");
+    }
+
+    let key = decode_base32_seed(seed)?;
+    let counter = epoch_seconds / period;
+    let mut mac = Hmac::<Sha1>::new_from_slice(&key)?;
+    mac.update(&counter.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let offset = (digest[19] & 0x0f) as usize;
+    let binary = ((u32::from(digest[offset]) & 0x7f) << 24)
+        | (u32::from(digest[offset + 1]) << 16)
+        | (u32::from(digest[offset + 2]) << 8)
+        | u32::from(digest[offset + 3]);
+    let modulo = 10_u64.pow(digits);
+    Ok(format!(
+        "{:0width$}",
+        u64::from(binary) % modulo,
+        width = digits as usize
+    ))
+}
+
+fn decode_base32_seed(seed: &str) -> anyhow::Result<Vec<u8>> {
+    let compact: String = seed
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '-' && *ch != '=')
+        .flat_map(char::to_uppercase)
+        .collect();
+    if compact.is_empty() {
+        anyhow::bail!("OTP seed cannot be empty");
+    }
+    let padding = (8 - compact.len() % 8) % 8;
+    let padded = format!("{compact}{}", "=".repeat(padding));
+    data_encoding::BASE32
+        .decode(padded.as_bytes())
+        .map_err(|err| anyhow::anyhow!("invalid base32 OTP seed: {err}"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,5 +515,38 @@ mod tests {
         });
         assert_eq!(secret.auth_method(), AuthMethod::ApiKey);
         assert_eq!(secret.reveal_field("api_key").as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn totp_matches_rfc6238_test_vector() {
+        let seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        assert_eq!(totp_at(seed, 59, 8, 30).unwrap(), "94287082");
+        assert_eq!(totp_at(seed, 1_111_111_109, 8, 30).unwrap(), "07081804");
+    }
+
+    #[test]
+    fn otp_secret_reveals_code_and_metadata() {
+        let secret = ProviderSecret::Otp(OtpMaterial {
+            seed: "JBSWY3DPEHPK3PXP".into(),
+            issuer: "Passka".into(),
+            account_name: "demo@example.com".into(),
+            digits: 6,
+            period: 30,
+        });
+        assert_eq!(secret.auth_method(), AuthMethod::Otp);
+        assert_eq!(secret.reveal_field("issuer").as_deref(), Some("Passka"));
+        assert_eq!(secret.reveal_field("code").unwrap().len(), 6);
+    }
+
+    #[test]
+    fn otp_secret_validation_rejects_invalid_seed() {
+        let secret = ProviderSecret::Otp(OtpMaterial {
+            seed: "not base32!?".into(),
+            issuer: String::new(),
+            account_name: String::new(),
+            digits: 6,
+            period: 30,
+        });
+        assert!(secret.validate().is_err());
     }
 }

@@ -101,12 +101,26 @@ cargo run -p passka-cli -- auth <account_id>
 
 Passka 会在本地保存和刷新 OAuth 授权材料。Agent 仍然通过 lease 和 proxy 访问服务，不会拿到 refresh token。
 
+## OTP 账号
+
+Passka 也可以保存 TOTP seed，并通过 broker reveal 路径生成当前一次性验证码：
+
+```bash
+cargo run -p passka-cli -- account add github-otp \
+  --provider github \
+  --auth otp
+
+cargo run -p passka-cli -- account reveal <account_id> --field code --raw
+```
+
+OTP seed 仍然保存在 macOS Keychain。查看 `code` 或 `seed` 会进入 audit log，并遵守和其他敏感字段相同的人类 reveal 规则。
+
 ## macOS App
 
 macOS App 是一个 broker 控制台：
 
 - 按 provider 浏览账号。
-- 添加 API Key、OAuth 和 opaque provider account。
+- 添加 API Key、OAuth、OTP 和 opaque provider account。
 - 通过本地认证后查看敏感字段。
 - 查看账号最近的 audit history。
 
@@ -191,6 +205,7 @@ cargo run -p passka-cli -- principal add <name> --kind agent
 cargo run -p passka-cli -- account list
 cargo run -p passka-cli -- account show <account_id>
 cargo run -p passka-cli -- account reveal <account_id> --field api_key
+cargo run -p passka-cli -- account reveal <account_id> --field code --raw
 cargo run -p passka-cli -- account remove <account_id>
 
 cargo run -p passka-cli -- policy list
