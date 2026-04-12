@@ -1,6 +1,6 @@
 use anyhow::Result;
 use dialoguer::{Input, Password};
-use passka_core::types::{mask_value, OAuthMaterial, OtpMaterial};
+use passka_core::types::{OAuthMaterial, OtpMaterial};
 use passka_core::{
     ApiKeyMaterial, AuthMethod, Broker, OpaqueSecretMaterial, ProviderKind, ProviderSecret,
     RegisterProviderAccount,
@@ -151,21 +151,29 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
+pub fn allow(
+    account_id: &str,
+    principal_id: &str,
+    environments: &[String],
+    lease_seconds: i64,
+    description: Option<&str>,
+) -> Result<()> {
+    let broker = Broker::new()?;
+    let authorization = broker.authorize_account(
+        principal_id,
+        account_id,
+        environments.to_vec(),
+        lease_seconds,
+        description.unwrap_or_default(),
+    )?;
+    println!("{}", serde_json::to_string_pretty(&authorization)?);
+    Ok(())
+}
+
 pub fn show(account_id: &str) -> Result<()> {
     let broker = Broker::new()?;
     let account = broker.get_account(account_id)?;
     println!("{}", serde_json::to_string_pretty(&account)?);
-    Ok(())
-}
-
-pub fn reveal(account_id: &str, field: &str, principal_id: &str, raw: bool) -> Result<()> {
-    let broker = Broker::new()?;
-    let value = broker.reveal_sensitive_field(principal_id, account_id, field)?;
-    if raw {
-        println!("{value}");
-    } else {
-        println!("{}", mask_value(&value));
-    }
     Ok(())
 }
 

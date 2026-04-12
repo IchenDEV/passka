@@ -9,7 +9,7 @@ pub fn run(account_id: &str) -> Result<()> {
     let broker = Broker::new()?;
     let session = broker.start_authorization(account_id)?;
     let redirect_uri = broker
-        .reveal_sensitive_field("principal:local-human", account_id, "redirect_uri")
+        .read_account_field_internal(account_id, "redirect_uri")
         .unwrap_or_else(|_| "http://localhost:8477/callback".into());
     let state = generate_state();
     let auth_url = append_state(&session.authorization_url, &state)?;

@@ -7,8 +7,7 @@ pub fn request(args: RequestArgs) -> Result<()> {
     let broker = Broker::new()?;
     let lease = broker.request_access(
         &args.principal,
-        &args.resource,
-        &args.action,
+        &args.account,
         AccessContext {
             environment: args.environment,
             purpose: args.purpose,

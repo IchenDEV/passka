@@ -1,0 +1,4 @@
+interface:
+  display_name: "Passka Operator"
+  short_description: "Operate Passka CLI and broker APIs"
+  default_prompt: "Use $passka-operator to manage Passka accounts, agents, leases, and proxy requests."

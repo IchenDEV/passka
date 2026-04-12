@@ -4,9 +4,9 @@ This file gives coding agents the current architecture and working rules for thi
 
 ## Project Overview
 
-Passka is a local Auth Broker for AI agents.
+Passka is a local credential vault and lease broker for AI agents.
 
-The model is broker-first: local principals request access to provider resources, Passka evaluates policy, issues short-lived leases, and optionally proxies HTTP requests without exposing long-lived provider material to the agent.
+The model is account-first: local principals request access to a stored credential account, Passka evaluates account authorization, issues short-lived leases, and optionally proxies HTTP requests without exposing long-lived provider material to the agent.
 
 ## Core Commands
 
@@ -29,11 +29,11 @@ cargo run -p passka-cli -- principal list
 # Register a provider account
 cargo run -p passka-cli -- account add openai-prod --provider openai --auth api_key --base-url https://api.openai.com
 
-# Create a broker policy
-cargo run -p passka-cli -- policy allow --principal principal:local-agent --account <account_id> --resource openai/models/* --actions read
+# Authorize an account for an agent
+cargo run -p passka-cli -- account allow <account_id> --agent principal:local-agent --lease-seconds 300
 
 # Request a short-lived access lease
-cargo run -p passka-cli -- request --principal principal:local-agent --resource openai/models/gpt-4.1 --action read
+cargo run -p passka-cli -- request --principal principal:local-agent --account <account_id>
 
 # Proxy an HTTP request with a lease
 cargo run -p passka-cli -- proxy --lease <lease_id> --method GET --path /v1/models
@@ -48,8 +48,8 @@ cargo run -p passka-cli -- audit list --limit 20
 
 Main broker library.
 
-- `broker.rs`: Broker service layer. Owns account registration, policy creation, access decisions, leases, audit events, OAuth completion/refresh, secret reveal checks, and HTTP proxy execution.
-- `types.rs`: Broker domain objects: `Principal`, `ProviderAccount`, `ResourceGrant`, `BrokerPolicy`, `AccessLease`, `AuditEvent`, `ProviderSecret`, `ApiKeyMaterial`, `OAuthMaterial`, and HTTP proxy request/response shapes.
+- `broker.rs`: Broker service layer. Owns account registration, account authorization, access decisions, leases, audit events, OAuth completion/refresh, secret reveal checks, and HTTP proxy execution.
+- `types.rs`: Broker domain objects: `Principal`, `ProviderAccount`, `AccountAuthorization`, `AccessLease`, `AuditEvent`, `ProviderSecret`, `ApiKeyMaterial`, `OAuthMaterial`, and HTTP proxy request/response shapes.
 - `store/keychain.rs`: Generic JSON/password helpers for macOS Keychain. New broker secrets use service `passka-broker`.
 - `oauth.rs`: OAuth code exchange and refresh helpers operating on `OAuthMaterial`.
 
@@ -59,9 +59,8 @@ CLI and local daemon.
 
 - `cli.rs`: Top-level subcommands and argument definitions.
 - `commands/broker.rs`: Local HTTP JSON daemon exposed by `passka broker serve`.
-- `commands/account.rs`: Register/list/show/reveal/remove provider accounts.
+- `commands/account.rs`: Register/list/show/remove provider accounts and authorize them for agents.
 - `commands/principal.rs`: Manage human/agent principals.
-- `commands/policy.rs`: Create and list broker policies.
 - `commands/access.rs`: Request leases and proxy HTTP requests.
 - `commands/audit.rs`: Audit inspection.
 - `commands/auth.rs` and `commands/refresh.rs`: OAuth flow helpers.
@@ -71,8 +70,8 @@ CLI and local daemon.
 SwiftPM macOS app.
 
 - `PasskaBridge`: A Swift wrapper around the broker CLI.
-- `CredentialStore.swift`: App-side observable state for provider accounts, policies, and audit events.
-- Views now present a broker console: provider accounts, sensitive field reveal after local authentication, and recent audit history.
+- `CredentialStore.swift`: App-side observable state for provider accounts, authorizations, principals, and audit events.
+- Views now present a broker console: provider accounts, agent registration, account authorization, sensitive field reveal after local authentication, and recent audit history.
 
 Do not reintroduce direct app reads from macOS Keychain.
 
@@ -82,7 +81,7 @@ Do not reintroduce direct app reads from macOS Keychain.
 - Broker state lives in `~/.config/passka/broker/state.json`.
 - Agents should receive leases and proxied results, not long-lived API keys, refresh tokens, or OAuth access tokens.
 - Human reveal is allowed only through explicit broker reveal APIs and app-side local authentication.
-- Every grant, denial, proxy request, token refresh, and reveal should produce an audit event when implemented through broker code.
+- Every authorization, denial, proxy request, token refresh, and reveal should produce an audit event when implemented through broker code.
 
 ## HTTP Daemon
 
@@ -96,9 +95,9 @@ GET    /accounts
 POST   /accounts
 GET    /accounts/{account_id}
 DELETE /accounts/{account_id}
-POST   /accounts/{account_id}/reveal
-GET    /policies
-POST   /policies/allow
+POST   /accounts/{account_id}/authorize
+POST   /app/accounts/{account_id}/reveal
+GET    /authorizations
 GET    /audit?limit=20
 POST   /access/request
 POST   /http/proxy
@@ -116,12 +115,12 @@ Do not add alternate security boundaries:
 - Secret-to-stdout workflows.
 - Environment-variable injection as the primary agent integration path.
 - Direct Swift reads from Keychain.
-- Native app bindings that bypass the broker policy layer.
+- Native app bindings that bypass the broker authorization layer.
 - Any parallel storage or authorization path outside `Broker`.
 
 ## Development Guidance
 
-- Keep `Broker` as the single policy/security boundary.
+- Keep `Broker` as the single authorization/security boundary.
 - Prefer adding methods and tests in `passka-core/src/broker.rs` before wiring CLI or app UI.
 - When adding provider support, model it as `ProviderAccount` plus provider-specific `ProviderSecret` material and proxy behavior.
 - When adding agent integrations, use `AccessLease` and `/http/proxy` rather than returning secrets.

@@ -4,9 +4,12 @@ struct CredentialListView: View {
     @EnvironmentObject var store: CredentialStore
     @Binding var selection: AccountEntry?
     @Binding var searchText: String
+    let providerFilter: String?
 
     private var displayed: [AccountEntry] {
-        let base = store.filteredAccounts()
+        let base = providerFilter.map { provider in
+            store.accounts.filter { $0.provider == provider }
+        } ?? store.accounts
         if searchText.isEmpty { return base }
         let q = searchText.lowercased()
         return base.filter {
@@ -56,9 +59,9 @@ struct CredentialListView: View {
                     Image(systemName: "lock.slash")
                         .font(.system(size: 36))
                         .foregroundStyle(.secondary)
-                    Text("No Provider Accounts")
+                    Text("No Credentials")
                         .font(.headline)
-                    Text("Add an account to let Passka broker access for agents.")
+                    Text("Add a credential to let Passka broker short-lived access for agents.")
                         .foregroundStyle(.secondary)
                 }
             }

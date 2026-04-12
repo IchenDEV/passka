@@ -24,21 +24,39 @@ struct AccountEntry: Identifiable, Hashable {
     }
 }
 
-struct PolicyEntry: Identifiable, Hashable {
+struct PrincipalEntry: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let kind: String
+    let description: String
+    let createdAt: String
+
+    init(from dict: [String: Any]) {
+        self.id = dict["id"] as? String ?? ""
+        self.name = dict["name"] as? String ?? ""
+        self.kind = dict["kind"] as? String ?? ""
+        self.description = dict["description"] as? String ?? ""
+        self.createdAt = dict["created_at"] as? String ?? ""
+    }
+}
+
+struct AuthorizationEntry: Identifiable, Hashable {
     let id: String
     let principalId: String
-    let grantIds: [String]
+    let accountId: String
     let environments: [String]
-    let allowSecretReveal: Bool
     let maxLeaseSeconds: Int
+    let description: String
+    let createdAt: String
 
     init(from dict: [String: Any]) {
         self.id = dict["id"] as? String ?? ""
         self.principalId = dict["principal_id"] as? String ?? ""
-        self.grantIds = dict["grant_ids"] as? [String] ?? []
+        self.accountId = dict["account_id"] as? String ?? ""
         self.environments = dict["environments"] as? [String] ?? []
-        self.allowSecretReveal = dict["allow_secret_reveal"] as? Bool ?? false
         self.maxLeaseSeconds = dict["max_lease_seconds"] as? Int ?? 0
+        self.description = dict["description"] as? String ?? ""
+        self.createdAt = dict["created_at"] as? String ?? ""
     }
 }
 
@@ -64,9 +82,9 @@ struct AuditEntry: Identifiable, Hashable {
 
 final class CredentialStore: ObservableObject {
     @Published var accounts: [AccountEntry] = []
-    @Published var policies: [PolicyEntry] = []
+    @Published var principals: [PrincipalEntry] = []
+    @Published var authorizations: [AuthorizationEntry] = []
     @Published var auditEvents: [AuditEntry] = []
-    @Published var selectedProvider: String? = nil
 
     init() {
         reload()
@@ -74,13 +92,9 @@ final class CredentialStore: ObservableObject {
 
     func reload() {
         accounts = PasskaBridge.listAccounts().map(AccountEntry.init(from:))
-        policies = PasskaBridge.listPolicies().map(PolicyEntry.init(from:))
+        principals = PasskaBridge.listPrincipals().map(PrincipalEntry.init(from:))
+        authorizations = PasskaBridge.listAuthorizations().map(AuthorizationEntry.init(from:))
         auditEvents = PasskaBridge.listAuditEvents(limit: 50).map(AuditEntry.init(from:))
-    }
-
-    func filteredAccounts() -> [AccountEntry] {
-        guard let selectedProvider else { return accounts }
-        return accounts.filter { $0.provider == selectedProvider }
     }
 
     func revealValue(accountId: String, field: String) -> String? {
@@ -90,6 +104,40 @@ final class CredentialStore: ObservableObject {
     func remove(accountId: String) {
         _ = PasskaBridge.removeAccount(accountId: accountId)
         reload()
+    }
+
+    var agentPrincipals: [PrincipalEntry] {
+        principals.filter { $0.kind == "agent" }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    func addAgent(name: String, description: String) -> Bool {
+        let ok = PasskaBridge.addPrincipal(name: name, kind: "agent", description: description)
+        if ok { reload() }
+        return ok
+    }
+
+    func authorize(accountId: String, agentPrincipalId: String, leaseSeconds: Int, environments: [String], description: String) -> Bool {
+        let ok = PasskaBridge.authorizeAccount(
+            accountId: accountId,
+            agentPrincipalId: agentPrincipalId,
+            leaseSeconds: leaseSeconds,
+            environments: environments,
+            description: description
+        )
+        if ok { reload() }
+        return ok
+    }
+
+    func accountName(for accountId: String) -> String {
+        accounts.first(where: { $0.id == accountId })?.name ?? accountId
+    }
+
+    func principalName(for principalId: String) -> String {
+        principals.first(where: { $0.id == principalId })?.name ?? principalId
+    }
+
+    func authorizations(for account: AccountEntry) -> [AuthorizationEntry] {
+        authorizations.filter { $0.accountId == account.id }
     }
 
     func addAPIKeyAccount(
@@ -188,5 +236,9 @@ final class CredentialStore: ObservableObject {
 
     func audits(for account: AccountEntry) -> [AuditEntry] {
         auditEvents.filter { $0.resource.contains(account.id) || $0.resource.contains(account.name) }
+    }
+
+    func lastActivity(for account: AccountEntry) -> AuditEntry? {
+        audits(for: account).first
     }
 }

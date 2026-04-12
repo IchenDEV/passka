@@ -3,13 +3,10 @@ pub mod account;
 pub mod audit;
 pub mod auth;
 pub mod broker;
-pub mod policy;
 pub mod principal;
 pub mod refresh;
 
-use crate::cli::{
-    AccountCommand, AuditCommand, BrokerCommand, Command, PolicyCommand, PrincipalCommand,
-};
+use crate::cli::{AccountCommand, AuditCommand, BrokerCommand, Command, PrincipalCommand};
 use anyhow::Result;
 
 pub fn dispatch(cmd: Command) -> Result<()> {
@@ -38,37 +35,22 @@ pub fn dispatch(cmd: Command) -> Result<()> {
                 description.as_deref(),
                 &scopes,
             ),
-            AccountCommand::List => account::list(),
-            AccountCommand::Show { account_id } => account::show(&account_id),
-            AccountCommand::Reveal {
+            AccountCommand::Allow {
                 account_id,
-                field,
-                principal,
-                raw,
-            } => account::reveal(&account_id, &field, &principal, raw),
-            AccountCommand::Remove { account_id } => account::remove(&account_id),
-        },
-        Command::Policy { command } => match command {
-            PolicyCommand::Allow {
-                principal,
-                account,
-                resource,
-                actions,
+                agent,
                 environments,
                 lease_seconds,
-                allow_secret_reveal,
                 description,
-            } => policy::allow(
-                &principal,
-                &account,
-                &resource,
-                &actions,
+            } => account::allow(
+                &account_id,
+                &agent,
                 &environments,
                 lease_seconds,
-                allow_secret_reveal,
                 description.as_deref(),
             ),
-            PolicyCommand::List => policy::list(),
+            AccountCommand::List => account::list(),
+            AccountCommand::Show { account_id } => account::show(&account_id),
+            AccountCommand::Remove { account_id } => account::remove(&account_id),
         },
         Command::Request(args) => access::request(args),
         Command::Proxy(args) => access::proxy(args),

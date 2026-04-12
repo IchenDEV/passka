@@ -19,11 +19,6 @@ pub enum Command {
         #[command(subcommand)]
         command: AccountCommand,
     },
-    /// Create and inspect broker policies
-    Policy {
-        #[command(subcommand)]
-        command: PolicyCommand,
-    },
     /// Request a short-lived access lease
     Request(RequestArgs),
     /// Proxy an HTTP request through the broker using a lease
@@ -71,41 +66,20 @@ pub enum AccountCommand {
         #[arg(long, value_delimiter = ',')]
         scopes: Vec<String>,
     },
-    List,
-    Show { account_id: String },
-    Reveal {
+    Allow {
         account_id: String,
         #[arg(long)]
-        field: String,
-        #[arg(long, default_value = "principal:local-human")]
-        principal: String,
-        #[arg(long)]
-        raw: bool,
-    },
-    Remove { account_id: String },
-}
-
-#[derive(Subcommand)]
-pub enum PolicyCommand {
-    Allow {
-        #[arg(long)]
-        principal: String,
-        #[arg(long)]
-        account: String,
-        #[arg(long)]
-        resource: String,
-        #[arg(long, value_delimiter = ',')]
-        actions: Vec<String>,
+        agent: String,
         #[arg(long, value_delimiter = ',')]
         environments: Vec<String>,
         #[arg(long, default_value_t = 300)]
         lease_seconds: i64,
-        #[arg(long)]
-        allow_secret_reveal: bool,
         #[arg(short, long)]
         description: Option<String>,
     },
     List,
+    Show { account_id: String },
+    Remove { account_id: String },
 }
 
 #[derive(Subcommand)]
@@ -129,9 +103,7 @@ pub struct RequestArgs {
     #[arg(long)]
     pub principal: String,
     #[arg(long)]
-    pub resource: String,
-    #[arg(long)]
-    pub action: String,
+    pub account: String,
     #[arg(long, default_value = "local")]
     pub environment: String,
     #[arg(long, default_value = "broker_request")]
@@ -154,4 +126,75 @@ pub struct ProxyArgs {
     pub extra_leases: Vec<String>,
     #[arg(long)]
     pub body: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_allow_is_the_primary_account_auth_flow() {
+        let cli = Cli::try_parse_from([
+            "passka",
+            "account",
+            "allow",
+            "account-123",
+            "--agent",
+            "principal:local-agent",
+            "--lease-seconds",
+            "120",
+        ])
+        .expect("account allow should parse");
+
+        match cli.command {
+            Command::Account {
+                command:
+                    AccountCommand::Allow {
+                        account_id,
+                        agent,
+                        lease_seconds,
+                        ..
+                    },
+            } => {
+                assert_eq!(account_id, "account-123");
+                assert_eq!(agent, "principal:local-agent");
+                assert_eq!(lease_seconds, 120);
+            }
+            _ => panic!("unexpected command shape"),
+        }
+    }
+
+    #[test]
+    fn request_uses_account_instead_of_resource_action() {
+        let cli = Cli::try_parse_from([
+            "passka",
+            "request",
+            "--principal",
+            "principal:local-agent",
+            "--account",
+            "account-123",
+        ])
+        .expect("request should parse");
+
+        match cli.command {
+            Command::Request(args) => {
+                assert_eq!(args.principal, "principal:local-agent");
+                assert_eq!(args.account, "account-123");
+            }
+            _ => panic!("unexpected command shape"),
+        }
+    }
+
+    #[test]
+    fn account_reveal_is_no_longer_available() {
+        let result = Cli::try_parse_from([
+            "passka",
+            "account",
+            "reveal",
+            "account-123",
+            "--field",
+            "api_key",
+        ]);
+        assert!(result.is_err());
+    }
 }

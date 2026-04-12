@@ -1,6 +1,10 @@
 import Foundation
 
 public enum PasskaBridge {
+    private static let brokerAddress = "127.0.0.1:8478"
+    private static let brokerBaseURL = URL(string: "http://\(brokerAddress)")!
+    private static var brokerProcess: Process?
+
     private static let cliPath: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
@@ -25,18 +29,21 @@ public enum PasskaBridge {
         accountId: String,
         field: String
     ) -> String? {
-        let value = shell([
-            cliPath,
-            "account",
-            "reveal",
-            accountId,
-            "--field",
-            field,
-            "--principal",
-            actorPrincipalId,
-            "--raw",
-        ])
-        return value.isEmpty ? nil : value
+        guard ensureBrokerDaemonRunning() else { return nil }
+        let payload: [String: String] = [
+            "actor_principal_id": actorPrincipalId,
+            "field": field,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let response = httpRequest(
+                path: "/app/accounts/\(accountId)/reveal",
+                method: "POST",
+                body: data
+              )
+        else {
+            return nil
+        }
+        return decodeString(response)
     }
 
     public static func registerAPIKeyAccount(
@@ -181,8 +188,39 @@ public enum PasskaBridge {
         ]) == 0
     }
 
-    public static func listPolicies() -> [[String: Any]] {
-        decodeArray(shell([cliPath, "policy", "list"]))
+    public static func listAuthorizations() -> [[String: Any]] {
+        guard ensureBrokerDaemonRunning(),
+              let data = httpRequest(path: "/authorizations", method: "GET", body: nil)
+        else {
+            return []
+        }
+        return decodeArray(data)
+    }
+
+    public static func authorizeAccount(
+        accountId: String,
+        agentPrincipalId: String,
+        leaseSeconds: Int,
+        environments: [String] = [],
+        description: String = ""
+    ) -> Bool {
+        var args = [
+            cliPath,
+            "account",
+            "allow",
+            accountId,
+            "--agent",
+            agentPrincipalId,
+            "--lease-seconds",
+            "\(leaseSeconds)",
+        ]
+        if !environments.isEmpty {
+            args += ["--environments", environments.joined(separator: ",")]
+        }
+        if !description.isEmpty {
+            args += ["--description", description]
+        }
+        return runStatus(args) == 0
     }
 
     public static func listAuditEvents(limit: Int? = nil) -> [[String: Any]] {
@@ -196,6 +234,12 @@ public enum PasskaBridge {
     private static func decodeArray(_ raw: String) -> [[String: Any]] {
         guard let data = raw.data(using: .utf8),
               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+        return arr
+    }
+
+    private static func decodeArray(_ data: Data) -> [[String: Any]] {
+        guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else { return [] }
         return arr
     }
@@ -249,5 +293,82 @@ public enum PasskaBridge {
         } catch {
             return false
         }
+    }
+
+    private static func ensureBrokerDaemonRunning() -> Bool {
+        if brokerHealthcheck() {
+            return true
+        }
+
+        if brokerProcess?.isRunning != true {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: cliPath)
+            proc.arguments = ["broker", "serve", "--addr", brokerAddress]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            do {
+                try proc.run()
+                brokerProcess = proc
+            } catch {
+                return false
+            }
+        }
+
+        for _ in 0..<20 {
+            if brokerHealthcheck() {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return false
+    }
+
+    private static func brokerHealthcheck() -> Bool {
+        guard let data = httpRequest(path: "/health", method: "GET", body: nil) else {
+            return false
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return object["ok"] as? Bool == true
+    }
+
+    private static func httpRequest(path: String, method: String, body: Data?) -> Data? {
+        let url = brokerBaseURL.appending(path: path)
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = 2
+        if let body {
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData: Data?
+        let task = URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { semaphore.signal() }
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  let data
+            else {
+                return
+            }
+            responseData = data
+        }
+        task.resume()
+        _ = semaphore.wait(timeout: .now() + 3)
+        return responseData
+    }
+
+    private static func decodeString(_ data: Data) -> String? {
+        if let value = try? JSONSerialization.jsonObject(with: data) as? String {
+            return value
+        }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = object["error"] as? String {
+            return error.isEmpty ? nil : nil
+        }
+        return String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

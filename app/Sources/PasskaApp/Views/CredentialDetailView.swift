@@ -35,19 +35,24 @@ struct CredentialDetailView: View {
         store.audits(for: entry)
     }
 
+    private var lastActivity: String {
+        store.lastActivity(for: entry)?.timestamp ?? "Never"
+    }
+
     var body: some View {
         Form {
-            Section("Account") {
+            Section("Credential") {
                 LabeledContent("Name", value: entry.name)
-                LabeledContent("Provider", value: entry.provider)
-                LabeledContent("Auth Method", value: entry.authMethod)
+                LabeledContent("Service", value: entry.provider)
+                LabeledContent("Type", value: entry.authMethod.replacingOccurrences(of: "_", with: " "))
                 LabeledContent("Base URL", value: entry.baseURL.isEmpty ? "—" : entry.baseURL)
                 LabeledContent("Description", value: entry.description.isEmpty ? "—" : entry.description)
                 LabeledContent("Scopes", value: entry.scopes.isEmpty ? "—" : entry.scopes.joined(separator: ", "))
                 LabeledContent("Created", value: entry.createdAt)
+                LabeledContent("Last Activity", value: lastActivity)
             }
 
-            Section("Sensitive Material") {
+            Section("Stored Secret") {
                 ForEach(fields, id: \.self) { field in
                     HStack {
                         Text(field).frame(width: 120, alignment: .leading)

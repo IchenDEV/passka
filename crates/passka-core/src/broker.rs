@@ -1,9 +1,9 @@
 use crate::oauth;
 use crate::store::keychain::KeychainStore;
 use crate::types::{
-    AccessContext, AccessLease, AuditEvent, AuditEventKind, AuditOutcome, AuthorizationSession,
-    BrokerPolicy, HttpProxyResponse, HttpRequestSpec, Principal, PrincipalKind, ProviderAccount,
-    ProviderSecret, RegisterProviderAccount, ResourceGrant,
+    AccessContext, AccessLease, AccountAuthorization, AuditEvent, AuditEventKind, AuditOutcome,
+    AuthorizationSession, HttpProxyResponse, HttpRequestSpec, Principal, PrincipalKind,
+    ProviderAccount, ProviderSecret, RegisterProviderAccount,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -18,10 +18,13 @@ const BROKER_SERVICE_NAME: &str = "passka-broker";
 #[cfg(test)]
 const DEFAULT_LEASE_SECONDS: i64 = 300;
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-const API_KEY_PLACEHOLDERS: &[&str] = &[
+const PRIMARY_API_KEY_PLACEHOLDERS: &[&str] = &[
     "{{PASSKA_API_KEY}}",
     "$PASSKA_API_KEY",
     "PASSKA_API_KEY",
+];
+
+const PRIMARY_TOKEN_PLACEHOLDERS: &[&str] = &[
     "{{PASSKA_TOKEN}}",
     "$PASSKA_TOKEN",
     "PASSKA_TOKEN",
@@ -36,12 +39,19 @@ struct ProxyCredential {
     inject_auth: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretAccessSource {
+    App,
+    #[cfg(test)]
+    Internal,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 struct BrokerState {
     principals: Vec<Principal>,
     accounts: Vec<ProviderAccount>,
-    grants: Vec<ResourceGrant>,
-    policies: Vec<BrokerPolicy>,
+    authorizations: Vec<AccountAuthorization>,
     leases: Vec<AccessLease>,
     audit_events: Vec<AuditEvent>,
 }
@@ -172,16 +182,9 @@ impl Broker {
         if state.accounts.len() == before {
             anyhow::bail!("account '{account_id}' not found");
         }
-        state.grants.retain(|grant| grant.account_id != account_id);
-        for policy in &mut state.policies {
-            policy.grant_ids.retain(|grant_id| {
-                state
-                    .grants
-                    .iter()
-                    .any(|grant| grant.id.as_str() == grant_id.as_str())
-            });
-        }
-        state.policies.retain(|policy| !policy.grant_ids.is_empty());
+        state
+            .authorizations
+            .retain(|authorization| authorization.account_id != account_id);
         let _ = KeychainStore::delete(BROKER_SERVICE_NAME, &secret_key(account_id));
         self.append_audit(
             &mut state,
@@ -195,21 +198,18 @@ impl Broker {
         Ok(())
     }
 
-    pub fn list_policies(&self) -> Result<Vec<BrokerPolicy>> {
-        Ok(self.load_state()?.policies)
+    pub fn list_authorizations(&self) -> Result<Vec<AccountAuthorization>> {
+        Ok(self.load_state()?.authorizations)
     }
 
-    pub fn allow_policy(
+    pub fn authorize_account(
         &self,
         principal_id: &str,
         account_id: &str,
-        resource: &str,
-        actions: Vec<String>,
         environments: Vec<String>,
         max_lease_seconds: i64,
-        allow_secret_reveal: bool,
         description: &str,
-    ) -> Result<BrokerPolicy> {
+    ) -> Result<AccountAuthorization> {
         let mut state = self.load_state()?;
         if !state
             .principals
@@ -226,38 +226,49 @@ impl Broker {
             anyhow::bail!("account '{account_id}' not found");
         }
 
-        let grant = ResourceGrant {
-            id: new_id("grant"),
-            account_id: account_id.to_string(),
-            resource: resource.to_string(),
-            actions,
-            description: description.to_string(),
-            created_at: now(),
-        };
+        if let Some(existing) = state.authorizations.iter_mut().find(|authorization| {
+            authorization.account_id == account_id && authorization.principal_id == principal_id
+        }) {
+            existing.environments = environments;
+            existing.max_lease_seconds = max_lease_seconds.max(30);
+            existing.description = description.to_string();
+            existing.updated_at = now();
+            let authorization = existing.clone();
+            self.append_audit(
+                &mut state,
+                principal_id,
+                AuditEventKind::AccountAuthorized,
+                AuditOutcome::Success,
+                format!("account:{account_id}"),
+                format!("updated account authorization '{}'", authorization.id),
+            );
+            self.save_state(&state)?;
+            return Ok(authorization);
+        }
+
         let now = now();
-        let policy = BrokerPolicy {
-            id: new_id("policy"),
+        let authorization = AccountAuthorization {
+            id: new_id("authz"),
             principal_id: principal_id.to_string(),
-            grant_ids: vec![grant.id.clone()],
+            account_id: account_id.to_string(),
             environments,
-            allow_secret_reveal,
             max_lease_seconds: max_lease_seconds.max(30),
+            description: description.to_string(),
             created_at: now.clone(),
             updated_at: now,
         };
 
-        state.grants.push(grant);
-        state.policies.push(policy.clone());
+        state.authorizations.push(authorization.clone());
         self.append_audit(
             &mut state,
             principal_id,
-            AuditEventKind::PolicyCreated,
+            AuditEventKind::AccountAuthorized,
             AuditOutcome::Success,
             format!("account:{account_id}"),
-            format!("policy '{}' created", policy.id),
+            format!("authorized account '{}' for agent access", account_id),
         );
         self.save_state(&state)?;
-        Ok(policy)
+        Ok(authorization)
     }
 
     pub fn list_audit_events(&self, limit: Option<usize>) -> Result<Vec<AuditEvent>> {
@@ -353,7 +364,7 @@ impl Broker {
         Ok(())
     }
 
-    pub fn reveal_sensitive_field(
+    pub fn reveal_sensitive_field_for_app(
         &self,
         actor_principal_id: &str,
         account_id: &str,
@@ -364,12 +375,10 @@ impl Broker {
             &mut state,
             actor_principal_id,
             format!("account:{account_id}:{field}"),
+            SecretAccessSource::App,
         )?;
 
-        let secret = self.load_secret(account_id)?;
-        let value = secret.reveal_field(field).ok_or_else(|| {
-            anyhow::anyhow!("field '{field}' not found on account '{account_id}'")
-        })?;
+        let value = self.read_account_field_internal(account_id, field)?;
         self.append_audit(
             &mut state,
             actor_principal_id,
@@ -382,11 +391,17 @@ impl Broker {
         Ok(value)
     }
 
+    pub fn read_account_field_internal(&self, account_id: &str, field: &str) -> Result<String> {
+        let secret = self.load_secret(account_id)?;
+        secret
+            .reveal_field(field)
+            .ok_or_else(|| anyhow::anyhow!("field '{field}' not found on account '{account_id}'"))
+    }
+
     pub fn request_access(
         &self,
         principal_id: &str,
-        resource: &str,
-        action: &str,
+        account_id: &str,
         context: AccessContext,
     ) -> Result<AccessLease> {
         let mut state = self.load_state()?;
@@ -399,59 +414,46 @@ impl Broker {
         }
 
         let decision = state
-            .policies
+            .authorizations
             .iter()
-            .filter(|policy| policy.principal_id == principal_id)
-            .find_map(|policy| {
-                if !policy.environments.is_empty()
+            .filter(|authorization| authorization.principal_id == principal_id)
+            .find_map(|authorization| {
+                if authorization.account_id != account_id {
+                    return None;
+                }
+                if !authorization.environments.is_empty()
                     && !context.environment.is_empty()
-                    && !policy
+                    && !authorization
                         .environments
                         .iter()
                         .any(|env| env == &context.environment)
                 {
                     return None;
                 }
-                policy.grant_ids.iter().find_map(|grant_id| {
-                    let grant = state.grants.iter().find(|grant| &grant.id == grant_id)?;
-                    if grant.actions.iter().any(|allowed| allowed == action)
-                        && resource_matches(&grant.resource, resource)
-                    {
-                        Some((policy.clone(), grant.clone()))
-                    } else {
-                        None
-                    }
-                })
+                Some(authorization.clone())
             });
 
-        let Some((policy, grant)) = decision else {
+        let Some(authorization) = decision else {
             self.append_audit(
                 &mut state,
                 principal_id,
                 AuditEventKind::AccessDenied,
                 AuditOutcome::Denied,
-                resource.to_string(),
-                format!(
-                    "denied action '{action}' in environment '{}'",
-                    context.environment
-                ),
+                format!("account:{account_id}"),
+                format!("agent is not authorized for account in '{}'", context.environment),
             );
             self.save_state(&state)?;
-            anyhow::bail!(
-                "no policy allows principal '{principal_id}' to perform '{action}' on '{resource}'"
-            );
+            anyhow::bail!("principal '{principal_id}' is not authorized to use account '{account_id}'");
         };
 
         let now = now();
-        let expires_at =
-            (Utc::now() + chrono::Duration::seconds(policy.max_lease_seconds.max(30))).to_rfc3339();
+        let expires_at = (Utc::now()
+            + chrono::Duration::seconds(authorization.max_lease_seconds.max(30)))
+        .to_rfc3339();
         let lease = AccessLease {
             id: new_id("lease"),
             principal_id: principal_id.to_string(),
-            account_id: grant.account_id.clone(),
-            grant_id: grant.id.clone(),
-            resource: resource.to_string(),
-            action: action.to_string(),
+            account_id: account_id.to_string(),
             expires_at,
             created_at: now,
             context,
@@ -462,7 +464,7 @@ impl Broker {
             principal_id,
             AuditEventKind::AccessGranted,
             AuditOutcome::Success,
-            resource.to_string(),
+            format!("account:{account_id}"),
             format!("lease '{}' created", lease.id),
         );
         self.save_state(&state)?;
@@ -597,7 +599,7 @@ impl Broker {
             &primary.lease.principal_id,
             AuditEventKind::ProxyRequest,
             AuditOutcome::Success,
-            primary.lease.resource.clone(),
+            format!("account:{}", primary.lease.account_id),
             format!("proxied {} {}", method_label, url),
         );
         self.save_state(&state)?;
@@ -738,7 +740,20 @@ impl Broker {
         state: &mut BrokerState,
         actor_principal_id: &str,
         resource: String,
+        source: SecretAccessSource,
     ) -> Result<()> {
+        if source != SecretAccessSource::App {
+            self.append_audit(
+                state,
+                actor_principal_id,
+                AuditEventKind::SecretRevealDenied,
+                AuditOutcome::Denied,
+                resource,
+                "sensitive values can only be revealed through the macOS app".into(),
+            );
+            self.save_state(state)?;
+            anyhow::bail!("sensitive values can only be revealed through the macOS app");
+        }
         let principal = state
             .principals
             .iter()
@@ -758,19 +773,15 @@ impl Broker {
             anyhow::bail!("principal '{actor_principal_id}' cannot reveal sensitive fields");
         }
 
-        let allowed = state
-            .policies
-            .iter()
-            .any(|policy| policy.principal_id == actor_principal_id && policy.allow_secret_reveal);
         let is_default_human = actor_principal_id == "principal:local-human";
-        if !(allowed || is_default_human) {
+        if !is_default_human {
             self.append_audit(
                 state,
                 actor_principal_id,
                 AuditEventKind::SecretRevealDenied,
                 AuditOutcome::Denied,
                 resource,
-                "principal has no secret reveal permission".into(),
+                "only the default local human can reveal secrets in the app".into(),
             );
             self.save_state(state)?;
             anyhow::bail!("principal '{actor_principal_id}' is not allowed to reveal secrets");
@@ -878,11 +889,7 @@ fn materialize_forward_body(body: Vec<u8>, credentials: &[ProxyCredential]) -> R
 fn replace_secret_placeholders(value: &str, credentials: &[ProxyCredential]) -> Result<String> {
     let mut replaced = value.to_string();
     if let Some(primary) = credentials.first() {
-        if let Some(token) = credential_token(primary)? {
-            for placeholder in API_KEY_PLACEHOLDERS {
-                replaced = replaced.replace(placeholder, &token);
-            }
-        }
+        replaced = replace_primary_placeholders(&replaced, primary)?;
     }
 
     for credential in credentials {
@@ -895,18 +902,26 @@ fn replace_secret_placeholders(value: &str, credentials: &[ProxyCredential]) -> 
     Ok(replaced)
 }
 
-fn credential_token(credential: &ProxyCredential) -> Result<Option<String>> {
-    Ok(match &credential.secret {
-        ProviderSecret::Opaque(_) => None,
-        ProviderSecret::ApiKey(secret) => Some(secret.api_key.clone()),
+fn replace_primary_placeholders(value: &str, credential: &ProxyCredential) -> Result<String> {
+    let mut replaced = value.to_string();
+    match &credential.secret {
+        ProviderSecret::Opaque(_) => {}
+        ProviderSecret::ApiKey(secret) => {
+            for placeholder in PRIMARY_API_KEY_PLACEHOLDERS {
+                replaced = replaced.replace(placeholder, &secret.api_key);
+            }
+        }
         ProviderSecret::OAuth(secret) => {
             if secret.access_token.is_empty() {
                 anyhow::bail!("OAuth account has no access token; run authorization first");
             }
-            Some(secret.access_token.clone())
+            for placeholder in PRIMARY_TOKEN_PLACEHOLDERS {
+                replaced = replaced.replace(placeholder, &secret.access_token);
+            }
         }
         ProviderSecret::Otp(_) => anyhow::bail!("OTP secrets cannot be proxied over HTTP"),
-    })
+    }
+    Ok(replaced)
 }
 
 fn credential_fields(credential: &ProxyCredential) -> Result<HashMap<String, String>> {
@@ -925,7 +940,6 @@ fn credential_fields(credential: &ProxyCredential) -> Result<HashMap<String, Str
         }
         ProviderSecret::ApiKey(secret) => {
             fields.insert("API_KEY".into(), secret.api_key.clone());
-            fields.insert("TOKEN".into(), secret.api_key.clone());
             fields.insert("HEADER_NAME".into(), secret.header_name.clone());
             fields.insert("HEADER_PREFIX".into(), secret.header_prefix.clone());
             if !secret.secret.is_empty() {
@@ -937,7 +951,6 @@ fn credential_fields(credential: &ProxyCredential) -> Result<HashMap<String, Str
                 anyhow::bail!("OAuth account has no access token; run authorization first");
             }
             fields.insert("TOKEN".into(), secret.access_token.clone());
-            fields.insert("ACCESS_TOKEN".into(), secret.access_token.clone());
             fields.insert("CLIENT_ID".into(), secret.client_id.clone());
             fields.insert("SCOPES".into(), secret.scopes.join(" "));
         }
@@ -1021,13 +1034,6 @@ fn validate_proxy_url(target_url: &str) -> Result<()> {
     }
 }
 
-fn resource_matches(pattern: &str, resource: &str) -> bool {
-    if pattern.ends_with('*') {
-        return resource.starts_with(pattern.trim_end_matches('*'));
-    }
-    pattern == resource
-}
-
 fn now() -> String {
     Utc::now().to_rfc3339()
 }
@@ -1069,8 +1075,7 @@ mod tests {
         let env = with_temp_home();
         let result = env.broker.request_access(
             "principal:local-agent",
-            "github/repos/demo",
-            "read",
+            "account-missing",
             AccessContext::default(),
         );
         assert!(result.is_err());
@@ -1080,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn human_secret_reveal_is_allowed() {
+    fn app_secret_reveal_is_allowed() {
         let env = with_temp_home();
         let account = env
             .broker
@@ -1100,10 +1105,85 @@ mod tests {
             .unwrap();
         let value = env
             .broker
-            .reveal_sensitive_field("principal:local-human", &account.id, "api_key")
+            .reveal_sensitive_field_for_app("principal:local-human", &account.id, "api_key")
             .unwrap();
         assert_eq!(value, "sk-test");
         drop(env);
+    }
+
+    #[test]
+    fn agent_secret_reveal_is_denied() {
+        let env = with_temp_home();
+        let account = env
+            .broker
+            .register_provider_account(RegisterProviderAccount {
+                name: "openai-denied".into(),
+                provider: ProviderKind::OpenAI,
+                base_url: "https://api.openai.com".into(),
+                description: String::new(),
+                scopes: vec![],
+                secret: ProviderSecret::ApiKey(ApiKeyMaterial {
+                    api_key: "sk-test".into(),
+                    header_name: "Authorization".into(),
+                    header_prefix: "Bearer".into(),
+                    secret: String::new(),
+                }),
+            })
+            .unwrap();
+        let result = env.broker.reveal_sensitive_field_for_app(
+            "principal:local-agent",
+            &account.id,
+            "api_key",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn authorize_account_updates_existing_authorization() {
+        let env = with_temp_home();
+        let account = env
+            .broker
+            .register_provider_account(RegisterProviderAccount {
+                name: "openai-update".into(),
+                provider: ProviderKind::OpenAI,
+                base_url: "https://api.openai.com".into(),
+                description: String::new(),
+                scopes: vec![],
+                secret: ProviderSecret::ApiKey(ApiKeyMaterial {
+                    api_key: "sk-update".into(),
+                    header_name: "Authorization".into(),
+                    header_prefix: "Bearer".into(),
+                    secret: String::new(),
+                }),
+            })
+            .unwrap();
+
+        let first = env
+            .broker
+            .authorize_account(
+                "principal:local-agent",
+                &account.id,
+                vec!["local".into()],
+                120,
+                "first pass",
+            )
+            .unwrap();
+        let second = env
+            .broker
+            .authorize_account(
+                "principal:local-agent",
+                &account.id,
+                vec!["prod".into()],
+                600,
+                "second pass",
+            )
+            .unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.environments, vec!["prod".to_string()]);
+        assert_eq!(second.max_lease_seconds, 600);
+        assert_eq!(second.description, "second pass");
+        assert_eq!(env.broker.list_authorizations().unwrap().len(), 1);
     }
 
     #[test]
@@ -1126,14 +1206,11 @@ mod tests {
             })
             .unwrap();
         env.broker
-            .allow_policy(
+            .authorize_account(
                 "principal:local-agent",
                 &account.id,
-                "github/repos/*",
-                vec!["read".into()],
                 vec![],
                 DEFAULT_LEASE_SECONDS,
-                false,
                 "",
             )
             .unwrap();
@@ -1185,8 +1262,7 @@ mod tests {
         let lease = broker
             .request_access(
                 "principal:local-agent",
-                "github/repos/demo",
-                "read",
+                &account.id,
                 AccessContext {
                     environment: "test".into(),
                     purpose: "unit test".into(),
@@ -1233,14 +1309,11 @@ mod tests {
             })
             .unwrap();
         env.broker
-            .allow_policy(
+            .authorize_account(
                 "principal:local-agent",
                 &account.id,
-                "openai/chat/*",
-                vec!["write".into()],
                 vec![],
                 DEFAULT_LEASE_SECONDS,
-                false,
                 "",
             )
             .unwrap();
@@ -1273,8 +1346,7 @@ mod tests {
             .broker
             .request_access(
                 "principal:local-agent",
-                "openai/chat/completions",
-                "write",
+                &account.id,
                 AccessContext {
                     environment: "test".into(),
                     purpose: "unit test".into(),
@@ -1335,26 +1407,20 @@ mod tests {
             .unwrap();
 
         env.broker
-            .allow_policy(
+            .authorize_account(
                 "principal:local-agent",
                 &primary.id,
-                "combo/request",
-                vec!["write".into()],
                 vec![],
                 DEFAULT_LEASE_SECONDS,
-                false,
                 "",
             )
             .unwrap();
         env.broker
-            .allow_policy(
+            .authorize_account(
                 "principal:local-agent",
                 &extra.id,
-                "github/tokens/read",
-                vec!["read".into()],
                 vec![],
                 DEFAULT_LEASE_SECONDS,
-                false,
                 "",
             )
             .unwrap();
@@ -1397,8 +1463,7 @@ mod tests {
             .broker
             .request_access(
                 "principal:local-agent",
-                "combo/request",
-                "write",
+                &primary.id,
                 AccessContext::default(),
             )
             .unwrap();
@@ -1406,8 +1471,7 @@ mod tests {
             .broker
             .request_access(
                 "principal:local-agent",
-                "github/tokens/read",
-                "read",
+                &extra.id,
                 AccessContext::default(),
             )
             .unwrap();
@@ -1427,5 +1491,279 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.body, "ok");
         drop(env);
+    }
+
+    #[test]
+    fn helper_functions_cover_proxy_path_edge_cases() {
+        let account = ProviderAccount {
+            id: "account-1".into(),
+            name: "demo".into(),
+            provider: ProviderKind::OpenAI,
+            auth_method: crate::types::AuthMethod::ApiKey,
+            base_url: "https://api.openai.com/".into(),
+            description: String::new(),
+            scopes: vec![],
+            created_at: now(),
+            updated_at: now(),
+        };
+
+        assert_eq!(
+            build_proxy_url(&account, "/v1/models").unwrap(),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(
+            build_proxy_url(&account, "https://example.com/raw").unwrap(),
+            "https://example.com/raw"
+        );
+        assert!(validate_proxy_url("https://example.com/path").is_ok());
+        assert!(validate_proxy_url("ftp://example.com/path").is_err());
+        assert_eq!(normalize_placeholder_alias(" github-app ").unwrap(), "GITHUB_APP");
+        assert_eq!(normalize_placeholder_field("api-key").unwrap(), "API_KEY");
+        assert!(normalize_placeholder_alias("___").is_err());
+        assert!(is_passka_control_header("X-Passka-Lease"));
+        assert!(is_hop_by_hop_header("Transfer-Encoding"));
+        assert_eq!(
+            alias_placeholders("GITHUB", "TOKEN"),
+            [
+                "PASSKA_GITHUB_TOKEN".to_string(),
+                "$PASSKA_GITHUB_TOKEN".to_string(),
+                "{{PASSKA_GITHUB_TOKEN}}".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn materialize_forward_helpers_cover_auth_and_body_paths() {
+        let credential = ProxyCredential {
+            alias: "DEFAULT".into(),
+            lease: AccessLease {
+                id: "lease-1".into(),
+                principal_id: "principal:local-agent".into(),
+                account_id: "account-1".into(),
+                expires_at: now(),
+                created_at: now(),
+                context: AccessContext::default(),
+            },
+            account: ProviderAccount {
+                id: "account-1".into(),
+                name: "openai".into(),
+                provider: ProviderKind::OpenAI,
+                auth_method: crate::types::AuthMethod::ApiKey,
+                base_url: "https://api.openai.com".into(),
+                description: String::new(),
+                scopes: vec![],
+                created_at: now(),
+                updated_at: now(),
+            },
+            secret: ProviderSecret::ApiKey(ApiKeyMaterial {
+                api_key: "sk-helper".into(),
+                header_name: "Authorization".into(),
+                header_prefix: "Bearer".into(),
+                secret: "secondary".into(),
+            }),
+            inject_auth: true,
+        };
+
+        let headers = materialize_forward_headers(
+            HashMap::from([
+                ("x-passka-lease".into(), "ignored".into()),
+                ("x-custom".into(), "PASSKA_API_KEY".into()),
+            ]),
+            &[credential.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            headers.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer sk-helper"
+        );
+        assert_eq!(headers.get("x-custom").unwrap().to_str().unwrap(), "sk-helper");
+
+        let body = materialize_forward_body(
+            br#"{"token":"PASSKA_API_KEY"}"#.to_vec(),
+            &[credential.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(body).unwrap(),
+            r#"{"token":"sk-helper"}"#
+        );
+
+        let non_utf8 = materialize_forward_body(vec![0xff, 0xfe], &[credential.clone()]).unwrap();
+        assert_eq!(non_utf8, vec![0xff, 0xfe]);
+
+        let untouched = materialize_forward_body(
+            br#"{"token":"PASSKA_TOKEN"}"#.to_vec(),
+            &[credential],
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(untouched).unwrap(),
+            r#"{"token":"PASSKA_TOKEN"}"#
+        );
+    }
+
+    #[test]
+    fn credential_fields_and_sensitive_access_helpers_cover_extra_branches() {
+        let oauth_credential = ProxyCredential {
+            alias: "SLACK".into(),
+            lease: AccessLease {
+                id: "lease-oauth".into(),
+                principal_id: "principal:local-agent".into(),
+                account_id: "account-oauth".into(),
+                expires_at: now(),
+                created_at: now(),
+                context: AccessContext::default(),
+            },
+            account: ProviderAccount {
+                id: "account-oauth".into(),
+                name: "slack".into(),
+                provider: ProviderKind::Slack,
+                auth_method: crate::types::AuthMethod::OAuth,
+                base_url: "https://slack.com/api".into(),
+                description: String::new(),
+                scopes: vec!["chat:write".into()],
+                created_at: now(),
+                updated_at: now(),
+            },
+            secret: ProviderSecret::OAuth(crate::types::OAuthMaterial {
+                authorize_url: "https://slack.com/oauth".into(),
+                token_url: "https://slack.com/api/oauth.v2.access".into(),
+                client_id: "client-id".into(),
+                client_secret: "client-secret".into(),
+                redirect_uri: "http://localhost:8477/callback".into(),
+                scopes: vec!["chat:write".into()],
+                access_token: "xoxb-token".into(),
+                refresh_token: String::new(),
+                expires_at: String::new(),
+            }),
+            inject_auth: false,
+        };
+
+        let fields = credential_fields(&oauth_credential).unwrap();
+        assert_eq!(fields.get("TOKEN").map(String::as_str), Some("xoxb-token"));
+        assert_eq!(fields.get("CLIENT_ID").map(String::as_str), Some("client-id"));
+        let replaced = replace_secret_placeholders(
+            r#"{"primary":"PASSKA_TOKEN","slack":"PASSKA_SLACK_TOKEN"}"#,
+            &[oauth_credential.clone()],
+        )
+        .unwrap();
+        assert!(replaced.contains("xoxb-token"));
+        assert!(!replaced.contains("PASSKA_SLACK_TOKEN"));
+
+        let env = with_temp_home();
+        let mut state = env.broker.load_state().unwrap();
+        assert!(env
+            .broker
+            .ensure_sensitive_access(
+                &mut state,
+                "principal:local-human",
+                "account:test:api_key".into(),
+                SecretAccessSource::App,
+            )
+            .is_ok());
+
+        let mut state = env.broker.load_state().unwrap();
+        assert!(env
+            .broker
+            .ensure_sensitive_access(
+                &mut state,
+                "principal:local-human",
+                "account:test:api_key".into(),
+                SecretAccessSource::Internal,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn extra_alias_token_placeholders_work_for_oauth_accounts() {
+        let primary = ProxyCredential {
+            alias: "DEFAULT".into(),
+            lease: AccessLease {
+                id: "lease-primary".into(),
+                principal_id: "principal:local-agent".into(),
+                account_id: "account-primary".into(),
+                expires_at: now(),
+                created_at: now(),
+                context: AccessContext::default(),
+            },
+            account: ProviderAccount {
+                id: "account-primary".into(),
+                name: "github".into(),
+                provider: ProviderKind::GitHub,
+                auth_method: crate::types::AuthMethod::ApiKey,
+                base_url: "https://api.github.com".into(),
+                description: String::new(),
+                scopes: vec![],
+                created_at: now(),
+                updated_at: now(),
+            },
+            secret: ProviderSecret::ApiKey(ApiKeyMaterial {
+                api_key: "gh-primary".into(),
+                header_name: "Authorization".into(),
+                header_prefix: "Bearer".into(),
+                secret: String::new(),
+            }),
+            inject_auth: true,
+        };
+        let slack = ProxyCredential {
+            alias: "SLACK".into(),
+            lease: AccessLease {
+                id: "lease-slack".into(),
+                principal_id: "principal:local-agent".into(),
+                account_id: "account-slack".into(),
+                expires_at: now(),
+                created_at: now(),
+                context: AccessContext::default(),
+            },
+            account: ProviderAccount {
+                id: "account-slack".into(),
+                name: "slack".into(),
+                provider: ProviderKind::Slack,
+                auth_method: crate::types::AuthMethod::OAuth,
+                base_url: "https://slack.com/api".into(),
+                description: String::new(),
+                scopes: vec![],
+                created_at: now(),
+                updated_at: now(),
+            },
+            secret: ProviderSecret::OAuth(crate::types::OAuthMaterial {
+                authorize_url: "https://slack.com/oauth".into(),
+                token_url: "https://slack.com/api/oauth.v2.access".into(),
+                client_id: "client-id".into(),
+                client_secret: "client-secret".into(),
+                redirect_uri: "http://localhost:8477/callback".into(),
+                scopes: vec!["chat:write".into()],
+                access_token: "xoxb-extra".into(),
+                refresh_token: String::new(),
+                expires_at: String::new(),
+            }),
+            inject_auth: false,
+        };
+
+        let replaced = replace_secret_placeholders(
+            r#"{"primary":"PASSKA_API_KEY","slack":"PASSKA_SLACK_TOKEN"}"#,
+            &[primary, slack],
+        )
+        .unwrap();
+        assert!(replaced.contains("gh-primary"));
+        assert!(replaced.contains("xoxb-extra"));
+        assert!(!replaced.contains("PASSKA_SLACK_TOKEN"));
+    }
+
+    #[test]
+    fn account_authorizations_are_account_scoped() {
+        let authorization = AccountAuthorization {
+            id: "authz-1".into(),
+            principal_id: "principal:local-agent".into(),
+            account_id: "account-openai".into(),
+            environments: vec!["local".into()],
+            max_lease_seconds: 300,
+            description: "openai access".into(),
+            created_at: now(),
+            updated_at: now(),
+        };
+
+        assert_eq!(authorization.account_id, "account-openai");
+        assert_eq!(authorization.environments, vec!["local".to_string()]);
     }
 }

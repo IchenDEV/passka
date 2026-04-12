@@ -31,17 +31,12 @@ struct PrincipalCreateRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct AllowPolicyRequest {
+struct AccountAuthorizeRequest {
     principal_id: String,
-    account_id: String,
-    resource: String,
-    actions: Vec<String>,
     #[serde(default)]
     environments: Vec<String>,
     #[serde(default = "default_lease_seconds")]
     max_lease_seconds: i64,
-    #[serde(default)]
-    allow_secret_reveal: bool,
     #[serde(default)]
     description: String,
 }
@@ -49,8 +44,7 @@ struct AllowPolicyRequest {
 #[derive(Debug, Deserialize)]
 struct RequestAccessRequest {
     principal_id: String,
-    resource: String,
-    action: String,
+    account_id: String,
     #[serde(default)]
     context: AccessContext,
 }
@@ -94,9 +88,9 @@ pub fn serve(addr: &str) -> Result<()> {
             "/accounts/{account_id}",
             get(get_account).delete(remove_account),
         )
-        .route("/accounts/{account_id}/reveal", post(reveal_account_field))
-        .route("/policies", get(list_policies))
-        .route("/policies/allow", post(allow_policy))
+        .route("/accounts/{account_id}/authorize", post(authorize_account))
+        .route("/app/accounts/{account_id}/reveal", post(reveal_account_field))
+        .route("/authorizations", get(list_authorizations))
         .route("/audit", get(list_audit_events))
         .route("/access/request", post(request_access))
         .route("/http/proxy", post(proxy_http))
@@ -171,31 +165,29 @@ async fn reveal_account_field(
     Path(account_id): Path<String>,
     Json(request): Json<RevealFieldRequest>,
 ) -> ApiResult {
-    json_result(state.broker.reveal_sensitive_field(
+    json_result(state.broker.reveal_sensitive_field_for_app(
         &request.actor_principal_id,
         &account_id,
         &request.field,
     ))
 }
 
-async fn list_policies(State(state): State<ApiState>) -> ApiResult {
-    json_result(state.broker.list_policies())
-}
-
-async fn allow_policy(
+async fn authorize_account(
     State(state): State<ApiState>,
-    Json(request): Json<AllowPolicyRequest>,
+    Path(account_id): Path<String>,
+    Json(request): Json<AccountAuthorizeRequest>,
 ) -> ApiResult {
-    json_result(state.broker.allow_policy(
+    json_result(state.broker.authorize_account(
         &request.principal_id,
-        &request.account_id,
-        &request.resource,
-        request.actions,
+        &account_id,
         request.environments,
         request.max_lease_seconds,
-        request.allow_secret_reveal,
         &request.description,
     ))
+}
+
+async fn list_authorizations(State(state): State<ApiState>) -> ApiResult {
+    json_result(state.broker.list_authorizations())
 }
 
 async fn list_audit_events(
@@ -211,8 +203,7 @@ async fn request_access(
 ) -> ApiResult {
     json_result(state.broker.request_access(
         &request.principal_id,
-        &request.resource,
-        &request.action,
+        &request.account_id,
         request.context,
     ))
 }

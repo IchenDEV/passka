@@ -364,25 +364,15 @@ fn decode_base32_seed(seed: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceGrant {
-    pub id: String,
-    pub account_id: String,
-    pub resource: String,
-    pub actions: Vec<String>,
-    #[serde(default)]
-    pub description: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrokerPolicy {
+pub struct AccountAuthorization {
     pub id: String,
     pub principal_id: String,
-    pub grant_ids: Vec<String>,
+    pub account_id: String,
     #[serde(default)]
     pub environments: Vec<String>,
-    pub allow_secret_reveal: bool,
     pub max_lease_seconds: i64,
+    #[serde(default)]
+    pub description: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -402,9 +392,6 @@ pub struct AccessLease {
     pub id: String,
     pub principal_id: String,
     pub account_id: String,
-    pub grant_id: String,
-    pub resource: String,
-    pub action: String,
     pub expires_at: String,
     pub created_at: String,
     pub context: AccessContext,
@@ -415,10 +402,10 @@ pub struct AccessLease {
 pub enum AuditEventKind {
     PrincipalCreated,
     AccountRegistered,
+    AccountAuthorized,
     AuthorizationStarted,
     AuthorizationCompleted,
     TokenRefreshed,
-    PolicyCreated,
     AccessGranted,
     AccessDenied,
     ProxyRequest,
@@ -500,6 +487,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn principal_kind_round_trips_display_and_parse() {
+        assert_eq!(PrincipalKind::Human.to_string(), "human");
+        assert_eq!("agent".parse::<PrincipalKind>().unwrap(), PrincipalKind::Agent);
+        assert!("robot".parse::<PrincipalKind>().is_err());
+    }
+
+    #[test]
+    fn provider_kind_round_trips_display_and_parse() {
+        assert_eq!(ProviderKind::OpenAI.to_string(), "openai");
+        assert_eq!(
+            "generic_api".parse::<ProviderKind>().unwrap(),
+            ProviderKind::GenericApi
+        );
+        assert!("unknown".parse::<ProviderKind>().is_err());
+    }
+
+    #[test]
+    fn auth_method_round_trips_display_and_parse() {
+        assert_eq!(AuthMethod::OAuth.to_string(), "oauth");
+        assert_eq!("otp".parse::<AuthMethod>().unwrap(), AuthMethod::Otp);
+        assert!("saml".parse::<AuthMethod>().is_err());
+    }
+
+    #[test]
     fn test_mask_value() {
         assert_eq!(mask_value("sk-abc123def456"), "sk****f456");
         assert_eq!(mask_value("ab"), "**");
@@ -518,10 +529,50 @@ mod tests {
     }
 
     #[test]
+    fn opaque_secret_fields_are_sorted_for_display() {
+        let secret = ProviderSecret::Opaque(OpaqueSecretMaterial {
+            fields: HashMap::from([
+                ("z_last".into(), "2".into()),
+                ("a_first".into(), "1".into()),
+            ]),
+        });
+        assert_eq!(
+            secret.fields_for_display(),
+            vec!["a_first".to_string(), "z_last".to_string()]
+        );
+        assert_eq!(secret.reveal_field("a_first").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn oauth_fields_for_display_include_runtime_tokens() {
+        let secret = ProviderSecret::OAuth(OAuthMaterial {
+            authorize_url: "https://example.com/auth".into(),
+            token_url: "https://example.com/token".into(),
+            client_id: "client-id".into(),
+            client_secret: "client-secret".into(),
+            redirect_uri: default_redirect_uri(),
+            scopes: vec!["scope:one".into(), "scope:two".into()],
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: "2030-01-01T00:00:00Z".into(),
+        });
+        assert!(secret.fields_for_display().contains(&"access_token".to_string()));
+        assert_eq!(secret.reveal_field("scopes").as_deref(), Some("scope:one scope:two"));
+        assert_eq!(secret.reveal_field("client_id").as_deref(), Some("client-id"));
+    }
+
+    #[test]
     fn totp_matches_rfc6238_test_vector() {
         let seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
         assert_eq!(totp_at(seed, 59, 8, 30).unwrap(), "94287082");
         assert_eq!(totp_at(seed, 1_111_111_109, 8, 30).unwrap(), "07081804");
+    }
+
+    #[test]
+    fn totp_rejects_invalid_digits_and_period() {
+        let seed = "JBSWY3DPEHPK3PXP";
+        assert!(totp_at(seed, 60, 5, 30).is_err());
+        assert!(totp_at(seed, 60, 6, 0).is_err());
     }
 
     #[test]
@@ -548,5 +599,10 @@ mod tests {
             period: 30,
         });
         assert!(secret.validate().is_err());
+    }
+
+    #[test]
+    fn decode_base32_seed_rejects_empty_input() {
+        assert!(decode_base32_seed("   - = ").is_err());
     }
 }
