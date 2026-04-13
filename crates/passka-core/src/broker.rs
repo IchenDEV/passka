@@ -21,6 +21,16 @@ const BROKER_SERVICE_NAME: &str = "passka-broker";
 #[cfg(test)]
 const DEFAULT_LEASE_SECONDS: i64 = 300;
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+const PRIMARY_API_KEY_PLACEHOLDERS: &[&str] = &[
+    "{{PASSKA_API_KEY}}",
+    "$PASSKA_API_KEY",
+    "PASSKA_API_KEY",
+];
+const PRIMARY_TOKEN_PLACEHOLDERS: &[&str] = &[
+    "{{PASSKA_TOKEN}}",
+    "$PASSKA_TOKEN",
+    "PASSKA_TOKEN",
+];
 
 #[derive(Debug, Clone)]
 struct ProxyCredential {
@@ -670,7 +680,7 @@ impl Broker {
         let method: reqwest::Method = method.parse().context("invalid HTTP method")?;
         validate_proxy_target_scope(&credential.lease, method.as_str(), url)?;
         let headers = materialize_forward_headers(headers, credential)?;
-        let body = materialize_forward_body(body);
+        let body = materialize_forward_body(body, credential)?;
         let client = reqwest::Client::new();
         let mut request = client.request(method, url).headers(headers);
         if !body.is_empty() {
@@ -854,7 +864,8 @@ fn materialize_forward_headers(
         let header_name: HeaderName = name
             .parse()
             .with_context(|| format!("invalid request header '{name}'"))?;
-        let header_value: HeaderValue = value
+        let header_value = replace_primary_placeholders(&value, &credential.secret)?;
+        let header_value: HeaderValue = header_value
             .parse()
             .with_context(|| format!("invalid request header value for '{name}'"))?;
         materialized.insert(header_name, header_value);
@@ -893,8 +904,39 @@ fn materialize_forward_headers(
     Ok(materialized)
 }
 
-fn materialize_forward_body(body: Vec<u8>) -> Vec<u8> {
-    body
+fn materialize_forward_body(body: Vec<u8>, credential: &ProxyCredential) -> Result<Vec<u8>> {
+    if body.is_empty() {
+        return Ok(body);
+    }
+    match String::from_utf8(body) {
+        Ok(text) => Ok(replace_primary_placeholders(&text, &credential.secret)?.into_bytes()),
+        Err(err) => Ok(err.into_bytes()),
+    }
+}
+
+fn replace_primary_placeholders(value: &str, secret: &ProviderSecret) -> Result<String> {
+    let mut replaced = value.to_string();
+    match secret {
+        ProviderSecret::ApiKey(secret) => {
+            for placeholder in PRIMARY_API_KEY_PLACEHOLDERS {
+                replaced = replaced.replace(placeholder, &secret.api_key);
+            }
+        }
+        ProviderSecret::OAuth(secret) => {
+            if secret.access_token.is_empty() && contains_any_placeholder(value, PRIMARY_TOKEN_PLACEHOLDERS) {
+                anyhow::bail!("OAuth account has no access token; run authorization first");
+            }
+            for placeholder in PRIMARY_TOKEN_PLACEHOLDERS {
+                replaced = replaced.replace(placeholder, &secret.access_token);
+            }
+        }
+        ProviderSecret::Opaque(_) | ProviderSecret::Otp(_) => {}
+    }
+    Ok(replaced)
+}
+
+fn contains_any_placeholder(value: &str, placeholders: &[&str]) -> bool {
+    placeholders.iter().any(|placeholder| value.contains(placeholder))
 }
 
 fn is_passka_control_header(name: &str) -> bool {
@@ -1353,7 +1395,7 @@ mod tests {
                 .get("x-client")
                 .and_then(|header| header.to_str().ok())
                 .unwrap_or_default()
-                == "passka-test";
+                == token;
             if authorized && forwarded {
                 "ok".to_string()
             } else {
@@ -1404,7 +1446,10 @@ mod tests {
                 HttpRequestSpec {
                     method: "GET".into(),
                     path: "/repos/demo".into(),
-                    headers: HashMap::from([("x-client".to_string(), "passka-test".to_string())]),
+                    headers: HashMap::from([(
+                        "x-client".to_string(),
+                        "PASSKA_API_KEY".to_string(),
+                    )]),
                     body: String::new(),
                 },
             )
@@ -1452,7 +1497,7 @@ mod tests {
                 .and_then(|header| header.to_str().ok())
                 .unwrap_or_default()
                 == "Bearer sk-forward";
-            if authorized && body == r#"{"message":"ok"}"# {
+            if authorized && body == r#"{"api_key":"sk-forward"}"# {
                 "ok".to_string()
             } else {
                 "missing".to_string()
@@ -1490,7 +1535,7 @@ mod tests {
                 "POST",
                 &format!("http://{addr}/v1/chat/completions"),
                 HashMap::from([("content-type".to_string(), "application/json".to_string())]),
-                br#"{"message":"ok"}"#.to_vec(),
+                br#"{"api_key":"PASSKA_API_KEY"}"#.to_vec(),
             )
             .unwrap();
 
@@ -1655,7 +1700,7 @@ mod tests {
         let headers = materialize_forward_headers(
             HashMap::from([
                 ("x-passka-lease".into(), "ignored".into()),
-                ("x-custom".into(), "plain-value".into()),
+                ("x-custom".into(), "PASSKA_API_KEY".into()),
             ]),
             &credential,
         )
@@ -1664,12 +1709,14 @@ mod tests {
             headers.get("authorization").unwrap().to_str().unwrap(),
             "Bearer sk-helper"
         );
-        assert_eq!(headers.get("x-custom").unwrap().to_str().unwrap(), "plain-value");
+        assert_eq!(headers.get("x-custom").unwrap().to_str().unwrap(), "sk-helper");
 
-        let body = materialize_forward_body(br#"{"token":"unchanged"}"#.to_vec());
-        assert_eq!(String::from_utf8(body).unwrap(), r#"{"token":"unchanged"}"#);
+        let body =
+            materialize_forward_body(br#"{"token":"PASSKA_API_KEY"}"#.to_vec(), &credential)
+                .unwrap();
+        assert_eq!(String::from_utf8(body).unwrap(), r#"{"token":"sk-helper"}"#);
 
-        let non_utf8 = materialize_forward_body(vec![0xff, 0xfe]);
+        let non_utf8 = materialize_forward_body(vec![0xff, 0xfe], &credential).unwrap();
         assert_eq!(non_utf8, vec![0xff, 0xfe]);
     }
 
@@ -1700,11 +1747,20 @@ mod tests {
             }),
         };
 
-        let headers = materialize_forward_headers(HashMap::new(), &credential).unwrap();
+        let headers = materialize_forward_headers(
+            HashMap::from([("x-token".into(), "PASSKA_TOKEN".into())]),
+            &credential,
+        )
+        .unwrap();
         assert_eq!(
             headers.get("authorization").unwrap().to_str().unwrap(),
             "Bearer xoxb-token"
         );
+        assert_eq!(headers.get("x-token").unwrap().to_str().unwrap(), "xoxb-token");
+
+        let body =
+            materialize_forward_body(br#"{"token":"PASSKA_TOKEN"}"#.to_vec(), &credential).unwrap();
+        assert_eq!(String::from_utf8(body).unwrap(), r#"{"token":"xoxb-token"}"#);
     }
 
     #[test]

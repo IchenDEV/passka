@@ -88,6 +88,7 @@ Do not reintroduce direct app reads from macOS Keychain.
 - Agent tokens are hashed in broker state and are only returned once at issuance time.
 - Leases snapshot scope from the selected authorization. Host and path scope default to `account.base_url` when explicit scope is omitted.
 - Agents should receive leases and proxied results, not long-lived API keys, refresh tokens, or OAuth access tokens.
+- Proxy requests may replace `PASSKA_API_KEY` or `PASSKA_TOKEN` in forwarded headers and UTF-8 text bodies for the primary leased account only.
 - There is currently no secret reveal surface in the CLI, app, or daemon.
 - Every authorization, denial, proxy request, and token refresh should produce an audit event when implemented through broker code.
 

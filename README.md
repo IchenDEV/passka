@@ -29,7 +29,7 @@ If an upstream key leaks, you rotate the credential inside Passka and keep the a
 | Agent | A local AI tool or automation that is allowed to use an account. |
 | Agent Token | A local broker-issued token that authenticates one agent principal to the daemon. |
 | Lease | A short-lived access ticket issued for one account and scoped to specific upstream targets. |
-| Proxy | The broker sends the upstream request after checking the lease scope. |
+| Proxy | The broker sends the upstream request after checking the lease scope and can replace primary placeholders before forwarding. |
 | Audit | A record of authorizations, token issuance/revocation, denials, proxy requests, and refreshes. |
 
 ## Why This Exists
@@ -68,6 +68,46 @@ Passka now has one primary flow:
 
 Administrative work stays on the CLI. Agent traffic goes through the daemon.
 
+```mermaid
+flowchart TD
+  subgraph Human["Human / Admin"]
+    H1["1. Add account in app or CLI"]
+    H2["2. Allow agent principal to use account"]
+    H3["3. Issue agent token once"]
+  end
+
+  subgraph Passka["Passka Broker"]
+    P1["Store long-lived secret in macOS Keychain"]
+    P2["Store account, authorization, and audit state"]
+    P3["Check token + account authorization"]
+    P4["Issue short-lived lease"]
+    P5["Check lease scope (host / method / path)"]
+    P6["Inject real credential and proxy upstream request"]
+    P7["Write audit events"]
+  end
+
+  subgraph Agent["AI / Agent"]
+    A1["4. Call /access/request with agent token + account_id"]
+    A2["5. Receive lease_id"]
+    A3["6. Call /http/proxy with lease_id"]
+    A4["7. Receive proxied response"]
+  end
+
+  H1 --> P1
+  H1 --> P2
+  H2 --> P2
+  H3 --> P2
+  A1 --> P3
+  P3 --> P4
+  P4 --> A2
+  A2 --> A3
+  A3 --> P5
+  P5 --> P6
+  P6 --> A4
+  P3 --> P7
+  P6 --> P7
+```
+
 ## Install
 
 GitHub Releases publish architecture-specific macOS artifacts for both the CLI and the desktop app:
@@ -104,92 +144,46 @@ Release artifacts are currently unsigned and not notarized, so the first launch 
 
 ## Quick Start
 
-Run the local broker:
+Assume the default agent principal `principal:local-agent`.
+
+1. Start the daemon
 
 ```bash
 cargo run -p passka-cli -- broker serve --addr 127.0.0.1:8478
 ```
 
-Check health:
-
-```bash
-curl http://127.0.0.1:8478/health
-```
-
-Add an account:
+2. Register one account, allow that agent, and issue one agent token
 
 ```bash
 cargo run -p passka-cli -- account add openai-prod \
   --provider openai \
   --auth api_key \
   --base-url https://api.openai.com
-```
 
-List existing principals:
-
-```bash
-cargo run -p passka-cli -- principal list
-```
-
-Passka bootstraps a default local agent as `principal:local-agent`. To register another agent:
-
-```bash
-cargo run -p passka-cli -- principal add my-agent \
-  --kind agent \
-  --description "My local AI agent"
-```
-
-Authorize the default local agent to use that account:
-
-```bash
-cargo run -p passka-cli -- account allow <account_id> \
-  --agent principal:local-agent \
-  --lease-seconds 300
-```
-
-If you want tighter capability boundaries, you can scope the authorization explicitly:
-
-```bash
 cargo run -p passka-cli -- account allow <account_id> \
   --agent principal:local-agent \
   --allow-host api.openai.com \
   --allow-method GET,POST \
-  --allow-path-prefix /v1/models,/v1/chat \
+  --allow-path-prefix /v1 \
   --lease-seconds 300
-```
 
-Issue an agent token for the default local agent:
-
-```bash
 cargo run -p passka-cli -- principal token issue principal:local-agent
 ```
 
-The command prints JSON containing `agent_token`. Store it when issued; Passka only returns the plaintext token at issuance time.
+The token command prints JSON containing `agent_token`. Passka only returns the plaintext token at issuance time.
 
-Request a short-lived lease:
+3. Request a lease, then proxy through Passka
 
 ```bash
 cargo run -p passka-cli -- request \
   --account <account_id> \
-  --agent-token <agent_token> \
-  --environment local \
-  --purpose "model discovery"
-```
+  --agent-token <agent_token>
 
-Use the lease through the direct proxy endpoint:
-
-```bash
 cargo run -p passka-cli -- proxy \
   --lease <lease_id> \
   --agent-token <agent_token> \
   --method GET \
   --path https://api.openai.com/v1/models
-```
-
-Inspect audit history:
-
-```bash
-cargo run -p passka-cli -- audit list --limit 20
 ```
 
 ## Supported Credential Types
@@ -229,6 +223,34 @@ curl -x http://127.0.0.1:8478 \
   --proxy-header "X-Passka-Agent-Token: <agent_token>" \
   --proxy-header "X-Passka-Lease: <lease_id>" \
   https://api.openai.com/v1/models
+```
+
+### Placeholder Replacement
+
+Passka can replace placeholders in forwarded headers and UTF-8 text bodies before sending the upstream request.
+
+- `PASSKA_API_KEY` for API key accounts
+- `PASSKA_TOKEN` for OAuth accounts
+
+This replacement uses only the primary proxied account for the lease. It does not reintroduce multi-lease alias expansion.
+
+Minimal example:
+
+```bash
+curl -s http://127.0.0.1:8478/http/proxy \
+  -H 'authorization: Bearer <agent_token>' \
+  -H 'content-type: application/json' \
+  -d '{
+    "lease_id": "<lease_id>",
+    "request": {
+      "method": "POST",
+      "path": "https://api.openai.com/v1/responses",
+      "headers": {
+        "x-debug-key": "PASSKA_API_KEY"
+      },
+      "body": "{\"api_key\":\"PASSKA_API_KEY\"}"
+    }
+  }'
 ```
 
 ## Lease Scope

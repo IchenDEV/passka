@@ -337,6 +337,7 @@ pub enum AuditEventKind {
     AgentTokenIssued,
     AgentTokenRevoked,
     AccountRegistered,
+    PolicyCreated,
     AccountAuthorized,
     AuthorizationStarted,
     AuthorizationCompleted,
@@ -344,6 +345,8 @@ pub enum AuditEventKind {
     AccessGranted,
     AccessDenied,
     ProxyRequest,
+    SecretViewed,
+    SecretRevealDenied,
     AccountRemoved,
 }
 
@@ -531,5 +534,17 @@ mod tests {
     #[test]
     fn decode_base32_seed_rejects_empty_input() {
         assert!(decode_base32_seed("   - = ").is_err());
+    }
+
+    #[test]
+    fn audit_event_kind_deserializes_legacy_values() {
+        let policy_created: AuditEventKind = serde_json::from_str(r#""policy_created""#).unwrap();
+        let secret_viewed: AuditEventKind = serde_json::from_str(r#""secret_viewed""#).unwrap();
+        let secret_reveal_denied: AuditEventKind =
+            serde_json::from_str(r#""secret_reveal_denied""#).unwrap();
+
+        assert_eq!(policy_created, AuditEventKind::PolicyCreated);
+        assert_eq!(secret_viewed, AuditEventKind::SecretViewed);
+        assert_eq!(secret_reveal_denied, AuditEventKind::SecretRevealDenied);
     }
 }
