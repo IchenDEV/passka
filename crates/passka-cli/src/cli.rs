@@ -120,6 +120,8 @@ pub struct RequestArgs {
     pub account: String,
     #[arg(long)]
     pub agent_token: String,
+    #[arg(long)]
+    pub broker_url: Option<String>,
     #[arg(long, default_value = "local")]
     pub environment: String,
     #[arg(long, default_value = "broker_request")]
@@ -134,6 +136,8 @@ pub struct ProxyArgs {
     pub lease: String,
     #[arg(long)]
     pub agent_token: String,
+    #[arg(long)]
+    pub broker_url: Option<String>,
     #[arg(long)]
     pub method: String,
     #[arg(long)]
@@ -231,6 +235,8 @@ mod tests {
             "account-123",
             "--agent-token",
             "ptok_123",
+            "--broker-url",
+            "http://127.0.0.1:9000",
         ])
         .expect("request should parse");
 
@@ -238,6 +244,35 @@ mod tests {
             Command::Request(args) => {
                 assert_eq!(args.account, "account-123");
                 assert_eq!(args.agent_token, "ptok_123");
+                assert_eq!(args.broker_url.as_deref(), Some("http://127.0.0.1:9000"));
+            }
+            _ => panic!("unexpected command shape"),
+        }
+    }
+
+    #[test]
+    fn proxy_accepts_broker_url_override() {
+        let cli = Cli::try_parse_from([
+            "passka",
+            "proxy",
+            "--lease",
+            "lease-123",
+            "--agent-token",
+            "ptok_123",
+            "--broker-url",
+            "http://127.0.0.1:9900",
+            "--method",
+            "GET",
+            "--path",
+            "https://example.com",
+        ])
+        .expect("proxy should parse");
+
+        match cli.command {
+            Command::Proxy(args) => {
+                assert_eq!(args.lease, "lease-123");
+                assert_eq!(args.agent_token, "ptok_123");
+                assert_eq!(args.broker_url.as_deref(), Some("http://127.0.0.1:9900"));
             }
             _ => panic!("unexpected command shape"),
         }

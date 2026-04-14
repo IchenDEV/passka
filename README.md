@@ -149,8 +149,11 @@ Assume the default agent principal `principal:local-agent`.
 1. Start the daemon
 
 ```bash
-cargo run -p passka-cli -- broker serve --addr 127.0.0.1:8478
+cargo run -p passka-cli -- broker serve
 ```
+
+Passka tries `127.0.0.1:8478` first. If that port is already busy, it automatically falls back to a free local port and prints the actual broker URL.
+CLI agent commands auto-discover the last started daemon. If you need to override that, pass `--broker-url <url>` or set `PASSKA_BROKER_URL`.
 
 2. Register one account, allow that agent, and issue one agent token
 
@@ -204,7 +207,7 @@ The agent sends the upstream request to Passka, and Passka injects the real cred
 Direct proxy request:
 
 ```bash
-curl -s http://127.0.0.1:8478/http/proxy \
+curl -s <broker_url>/http/proxy \
   -H 'authorization: Bearer <agent_token>' \
   -H 'content-type: application/json' \
   -d '{
@@ -219,7 +222,7 @@ curl -s http://127.0.0.1:8478/http/proxy \
 Forward proxy request:
 
 ```bash
-curl -x http://127.0.0.1:8478 \
+curl -x <broker_url> \
   --proxy-header "X-Passka-Agent-Token: <agent_token>" \
   --proxy-header "X-Passka-Lease: <lease_id>" \
   https://api.openai.com/v1/models
@@ -237,7 +240,7 @@ This replacement uses only the primary proxied account for the lease. It does no
 Minimal example:
 
 ```bash
-curl -s http://127.0.0.1:8478/http/proxy \
+curl -s <broker_url>/http/proxy \
   -H 'authorization: Bearer <agent_token>' \
   -H 'content-type: application/json' \
   -d '{
@@ -297,6 +300,8 @@ Notes:
 - `/access/request` takes `account_id` plus optional `context`; the daemon derives the principal from the authenticated token.
 - Proxy execution enforces the scoped lease snapshot on every request.
 - Administrative actions such as account registration, authorization, OAuth completion, and audit inspection stay on the CLI/admin side.
+- `passka request` and `passka proxy` auto-discover the last started daemon, so they keep working when the daemon moves off `127.0.0.1:8478`.
+- For raw HTTP tools such as `curl`, use the broker URL printed by `passka broker serve`.
 
 ## Development
 

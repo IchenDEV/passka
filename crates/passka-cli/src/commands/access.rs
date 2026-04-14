@@ -1,3 +1,4 @@
+use crate::broker_url::{configured_broker_url, default_broker_url, load_runtime};
 use crate::cli::{ProxyArgs, RequestArgs};
 use anyhow::{Context, Result};
 use passka_core::{AccessContext, HttpRequestSpec};
@@ -5,14 +6,13 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-const DEFAULT_BROKER_URL: &str = "http://127.0.0.1:8478";
-
 pub fn request(args: RequestArgs) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
+    let client = reqwest::Client::new();
+    let broker_url = runtime.block_on(resolve_broker_base_url(args.broker_url.as_deref(), &client))?;
     let response = runtime.block_on(async {
-        let client = reqwest::Client::new();
         let response = client
-            .post(format!("{DEFAULT_BROKER_URL}/access/request"))
+            .post(format!("{broker_url}/access/request"))
             .headers(agent_headers(&args.agent_token)?)
             .json(&json!({
                 "account_id": args.account,
@@ -24,7 +24,7 @@ pub fn request(args: RequestArgs) -> Result<()> {
             }))
             .send()
             .await
-            .context("failed to call broker daemon")?;
+            .with_context(|| format!("failed to call broker daemon at {broker_url}"))?;
         response_json(response).await
     })?;
     println!("{}", serde_json::to_string_pretty(&response)?);
@@ -34,10 +34,11 @@ pub fn request(args: RequestArgs) -> Result<()> {
 pub fn proxy(args: ProxyArgs) -> Result<()> {
     let headers = parse_headers(&args.headers)?;
     let runtime = tokio::runtime::Runtime::new()?;
+    let client = reqwest::Client::new();
+    let broker_url = runtime.block_on(resolve_broker_base_url(args.broker_url.as_deref(), &client))?;
     let response = runtime.block_on(async {
-        let client = reqwest::Client::new();
         let response = client
-            .post(format!("{DEFAULT_BROKER_URL}/http/proxy"))
+            .post(format!("{broker_url}/http/proxy"))
             .headers(agent_headers(&args.agent_token)?)
             .json(&json!({
                 "lease_id": args.lease,
@@ -50,11 +51,35 @@ pub fn proxy(args: ProxyArgs) -> Result<()> {
             }))
             .send()
             .await
-            .context("failed to call broker daemon")?;
+            .with_context(|| format!("failed to call broker daemon at {broker_url}"))?;
         response_json(response).await
     })?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
+}
+
+async fn resolve_broker_base_url(
+    explicit: Option<&str>,
+    client: &reqwest::Client,
+) -> Result<String> {
+    if let Some(url) = configured_broker_url(explicit)? {
+        return Ok(url);
+    }
+
+    if let Some(runtime) = load_runtime()? {
+        if broker_health_ok(client, &runtime.url).await {
+            return Ok(runtime.url);
+        }
+    }
+
+    Ok(default_broker_url().to_string())
+}
+
+async fn broker_health_ok(client: &reqwest::Client, broker_url: &str) -> bool {
+    match client.get(format!("{broker_url}/health")).send().await {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    }
 }
 
 fn agent_headers(agent_token: &str) -> Result<HeaderMap> {

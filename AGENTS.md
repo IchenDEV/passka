@@ -21,7 +21,7 @@ cargo test --workspace
 cd app && swift build
 
 # Run the local broker daemon
-cargo run -p passka-cli -- broker serve --addr 127.0.0.1:8478
+cargo run -p passka-cli -- broker serve
 
 # Inspect default principals
 cargo run -p passka-cli -- principal list
@@ -43,6 +43,9 @@ cargo run -p passka-cli -- request --account <account_id> --agent-token <agent_t
 
 # Proxy an HTTP request with a lease
 cargo run -p passka-cli -- proxy --lease <lease_id> --agent-token <agent_token> --method GET --path /v1/models
+
+# Override daemon discovery when needed
+PASSKA_BROKER_URL=http://127.0.0.1:9000 cargo run -p passka-cli -- request --account <account_id> --agent-token <agent_token>
 
 # Inspect audit history
 cargo run -p passka-cli -- audit list --limit 20
@@ -67,7 +70,7 @@ CLI and local daemon.
 - `commands/broker.rs`: Local HTTP daemon for the default agent plane exposed by `passka broker serve`.
 - `commands/account.rs`: Register/list/show/remove provider accounts and authorize them for agents.
 - `commands/principal.rs`: Manage human/agent principals and issue/revoke agent tokens.
-- `commands/access.rs`: Agent-facing daemon client for requesting leases and proxying HTTP requests.
+- `commands/access.rs`: Agent-facing daemon client for requesting leases and proxying HTTP requests. It auto-discovers the last started daemon and also accepts explicit broker URL overrides.
 - `commands/audit.rs`: Audit inspection.
 - `commands/auth.rs` and `commands/refresh.rs`: OAuth flow helpers.
 
@@ -85,6 +88,7 @@ Do not reintroduce direct app reads from macOS Keychain.
 
 - Long-lived provider material lives in macOS Keychain under service `passka-broker`.
 - Broker state lives in `~/.config/passka/broker/state.json`.
+- The last daemon URL is written to `runtime.json` in the same broker config directory so agent-facing CLI commands can follow port changes.
 - Agent tokens are hashed in broker state and are only returned once at issuance time.
 - Leases snapshot scope from the selected authorization. Host and path scope default to `account.base_url` when explicit scope is omitted.
 - Agents should receive leases and proxied results, not long-lived API keys, refresh tokens, or OAuth access tokens.
@@ -105,6 +109,7 @@ POST   /http/proxy
 Prefer adding new agent-facing capabilities to this daemon instead of creating ad hoc CLI-only credential access.
 Authenticate JSON API calls with `Authorization: Bearer <agent_token>`.
 Authenticate forward proxy requests with `X-Passka-Agent-Token: <agent_token>`.
+When `127.0.0.1:8478` is busy, `passka broker serve` should fall back to a free local port and update `runtime.json` so `request` and `proxy` keep working.
 
 ## Things To Avoid
 

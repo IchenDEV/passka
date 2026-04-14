@@ -1,3 +1,4 @@
+use crate::broker_url;
 use anyhow::{Context, Result};
 use axum::body::to_bytes;
 use axum::extract::Request;
@@ -10,6 +11,7 @@ use passka_core::{AccessContext, Broker, HttpRequestSpec, HttpProxyResponse, Pri
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 
 #[derive(Clone)]
@@ -44,16 +46,54 @@ pub fn serve(addr: &str) -> Result<()> {
     let app = app_router(state);
 
     let addr: SocketAddr = addr.parse().context("invalid broker listen address")?;
-    eprintln!("passka broker listening on http://{addr}");
+    let pid = std::process::id();
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        let listener = tokio::net::TcpListener::bind(addr)
+        let (listener, used_fallback_port) = bind_listener(addr).await?;
+        let local_addr = listener
+            .local_addr()
+            .context("failed to inspect broker listener address")?;
+        let runtime_url = format!("http://{local_addr}");
+        broker_url::write_runtime(&runtime_url)?;
+
+        if used_fallback_port {
+            eprintln!(
+                "passka broker default port http://{addr} was busy; using {runtime_url} instead"
+            );
+        } else {
+            eprintln!("passka broker listening on {runtime_url}");
+        }
+
+        let result = axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
             .await
-            .context("failed to bind broker listener")?;
-        axum::serve(listener, app)
-            .await
-            .context("broker server failed")
+            .context("broker server failed");
+        let _ = broker_url::clear_runtime_if_owner(pid);
+        result
     })
+}
+
+async fn bind_listener(addr: SocketAddr) -> Result<(tokio::net::TcpListener, bool)> {
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => Ok((listener, false)),
+        Err(err) if should_fallback_to_free_port(addr, &err) => {
+            let fallback_addr = SocketAddr::new(addr.ip(), 0);
+            let listener = tokio::net::TcpListener::bind(fallback_addr).await.context(
+                "failed to bind broker listener after the default port was already in use",
+            )?;
+            Ok((listener, true))
+        }
+        Err(err) if err.kind() == ErrorKind::AddrInUse => anyhow::bail!(
+            "failed to bind broker listener on http://{addr}: address already in use. Stop the existing process, choose a different --addr, or use --addr 127.0.0.1:0 to let Passka pick a free local port"
+        ),
+        Err(err) => Err(err).context("failed to bind broker listener"),
+    }
+}
+
+fn should_fallback_to_free_port(addr: SocketAddr, err: &std::io::Error) -> bool {
+    err.kind() == ErrorKind::AddrInUse && addr.ip().is_loopback() && addr.port() == 8478
 }
 
 fn app_router(state: ApiState) -> Router {

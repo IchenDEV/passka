@@ -1,4 +1,5 @@
 mod cli;
+mod broker_url;
 mod commands;
 
 use clap::Parser;
